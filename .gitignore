@@ -1,4 +1,4 @@
 # gitignore
 .env
-ets.js
+/automated/ets.py
 git.sh

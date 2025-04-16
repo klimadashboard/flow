@@ -29,7 +29,7 @@ ENTRY_TAG = {
     "EinheitenWind": "EinheitWind"
 }
 BATCH_SIZE = int(os.getenv("DIRECTUS_BATCH_SIZE", 2000))
-UPDATE_DAYS_BACK = int(os.getenv("UPDATE_DAYS_BACK", 7))
+UPDATE_DAYS_BACK = int(os.getenv("UPDATE_DAYS_BACK", 3))
 HEADERS = {
     "Authorization": f"Bearer {DIRECTUS_TOKEN}",
     "Content-Type": "application/json"

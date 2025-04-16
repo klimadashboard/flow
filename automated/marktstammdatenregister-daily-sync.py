@@ -17,6 +17,7 @@ load_dotenv()
 # Configuration
 DIRECTUS_URL = os.getenv("DIRECTUS_API_URL")
 DIRECTUS_TOKEN = os.getenv("DIRECTUS_API_TOKEN")
+LOG_FILE = "/var/log/marktstammdatenregister-daily-sync.log"
 ZIP_NAME = "Gesamtdatenexport.zip"
 EXTRACT_DIR = "marktstamm_tmp"
 TABLES = {

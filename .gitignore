@@ -2,4 +2,5 @@
 .env
 /automated/ets.py
 git.sh
-/automated
+/manual/wip/*
+/automated/__pycache__/*

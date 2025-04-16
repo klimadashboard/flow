@@ -4,6 +4,7 @@ import datetime
 from datetime import date, timedelta
 from dotenv import load_dotenv
 import os
+from slack_logger import slack_log
 
 # Load from the nearest .env file (searches parent directories too)
 load_dotenv()
@@ -134,15 +135,24 @@ def process_and_upload_aggm(existing_data, csv_data):
         upsert_data(existing_data, region, period, "AGGM", "gas|usage", "TWh", value)
 
 def main():
-    existing_data = fetch_existing_data()
-    
-    csv_data_aggm = fetch_csv(csv_url_aggm)
-    if csv_data_aggm:
-        process_and_upload_aggm(existing_data, csv_data_aggm)
+    slack_log("📊 Starte Gasdaten-Sync (AGGM & BNetzA)", level="INFO")
 
-    csv_data_bna = fetch_csv(csv_url_bna)
-    if csv_data_bna:
-        process_and_upload_bna(existing_data, csv_data_bna)
+    try:
+        existing_data = fetch_existing_data()
+        
+        csv_data_aggm = fetch_csv(csv_url_aggm)
+        if csv_data_aggm:
+            process_and_upload_aggm(existing_data, csv_data_aggm)
+
+        csv_data_bna = fetch_csv(csv_url_bna)
+        if csv_data_bna:
+            process_and_upload_bna(existing_data, csv_data_bna)
+
+        slack_log("Gasdaten-Sync abgeschlossen.", level="SUCCESS")
+    
+    except Exception as e:
+        slack_log(f"❌ Fehler bei Gasdaten-Sync (AGGM & BNetzA): {e}", level="ERROR")
+        raise
 
 if __name__ == "__main__":
     main()

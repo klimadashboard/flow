@@ -6,6 +6,7 @@ import io
 import urllib.request
 from datetime import datetime
 import time
+from slack_logger import slack_log
 from dotenv import load_dotenv
 import os
 
@@ -181,9 +182,12 @@ def batch_update_data_in_directus(data_list, station_id):
 
 # Main script
 if __name__ == "__main__":
+    slack_log("start dwd data sync", level="INFO")
     station_ids = get_station_ids()
     for station_id in station_ids:
         try:
             process_station_data(station_id)
         except Exception as e:
             print(f"ERROR processing station {station_id}: {e}")
+            slack_log(f"❌ Fehler bei DWD-Datensync für Station {station_id}: {e}", level="ERROR")
+    slack_log("dwd data sync completed", level="SUCCESS")

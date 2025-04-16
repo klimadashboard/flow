@@ -4,6 +4,8 @@ from datetime import datetime
 import statistics
 from dotenv import load_dotenv
 import os
+from slack_logger import slack_log
+from time import time
 
 # Load from the nearest .env file (searches parent directories too)
 load_dotenv()
@@ -231,24 +233,34 @@ def upsert_records(records):
 # Main Script
 # =====================================
 if __name__ == "__main__":
+    start_time = time()
+    slack_log("🔄 Start der Aktualisierung des renewable_share", level="INFO")
     logging.info("Starting data update process...")
-    
-    all_records = []
-    
-    for country in COUNTRIES:
-        daily_records = fetch_all_years_daily_data(country)
-        weekly_records = calculate_rolling_averages(daily_records, 7, "week")
-        monthly_records = calculate_rolling_averages(daily_records, 30, "month")
-        yearly_records = calculate_rolling_averages(daily_records, 365, "year")
-        fifteen_min_records = fetch_fifteen_min_data(country)
-        
-        all_records.extend(daily_records)
-        all_records.extend(weekly_records)
-        all_records.extend(monthly_records)
-        all_records.extend(yearly_records)
-        all_records.extend(fifteen_min_records)
-    
-    logging.info(f"Total records collected: {len(all_records)}")
-    upsert_records(all_records)
-    
-    logging.info("Data update complete.")
+
+    try:
+        all_records = []
+
+        for country in COUNTRIES:
+            daily_records = fetch_all_years_daily_data(country)
+            weekly_records = calculate_rolling_averages(daily_records, 7, "week")
+            monthly_records = calculate_rolling_averages(daily_records, 30, "month")
+            yearly_records = calculate_rolling_averages(daily_records, 365, "year")
+            fifteen_min_records = fetch_fifteen_min_data(country)
+
+            all_records.extend(daily_records)
+            all_records.extend(weekly_records)
+            all_records.extend(monthly_records)
+            all_records.extend(yearly_records)
+            all_records.extend(fifteen_min_records)
+
+        total = len(all_records)
+        logging.info(f"Total records collected: {total}")
+        upsert_records(all_records)
+
+        duration = round(time() - start_time)
+        slack_log(f"✅ Datenaktualisierung renewable_share abgeschlossen in {duration}s\nGesamtanzahl Einträge: {total}", level="SUCCESS")
+        logging.info("Data update complete.")
+    except Exception as e:
+        slack_log(f"❌ Fehler bei renewable_share: {e}", level="ERROR")
+        logging.error(f"Unexpected error: {e}")
+

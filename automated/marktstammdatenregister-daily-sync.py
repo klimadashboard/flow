@@ -10,6 +10,7 @@ import time
 from datetime import datetime, timedelta
 from dateutil.parser import parse as parse_date
 from dotenv import load_dotenv
+from slack_logger import slack_log
 
 # Load environment variables
 load_dotenv()
@@ -146,10 +147,13 @@ def parse_files(prefix, table_name):
     tag = ENTRY_TAG[prefix]
     found = 0
     written = 0
+    failed = 0
+
     for file in sorted(Path(EXTRACT_DIR).rglob(f"{prefix}*.xml")):
         log(f"🔍 Verarbeite {file.name}")
         context = ET.iterparse(file, events=("end",))
         batch = []
+
         for event, elem in context:
             if elem.tag == tag:
                 try:
@@ -208,13 +212,16 @@ def parse_files(prefix, table_name):
                         batch.clear()
                 except Exception as e:
                     log(f"⚠️ Fehler beim Parsen eines Eintrags: {e}")
+                    failed += 1
                 finally:
                     elem.clear()
+
         if batch:
             process_batch(batch, table_name)
             written += len(batch)
 
     log(f"📊 Verarbeitet: {found}, Eingefügt/Aktualisiert: {written} für {prefix}")
+    return found, written, failed
 
 def cleanup():
     log("🧹 Lösche temporäre Dateien...")
@@ -224,11 +231,35 @@ def cleanup():
         os.remove(ZIP_NAME)
 
 if __name__ == "__main__":
+    from time import time
+
+    slack_log("📥 Sync des Marktstammdatenregisters gestartet.", level="INFO")
+    start_time = time()
+
+    total_found = 0
+    total_written = 0
+    total_failed = 0
+
     try:
         download_zip()
         extract_needed_files()
         for prefix, table in TABLES.items():
-            parse_files(prefix, table)
+            found, written, failed = parse_files(prefix, table)
+            total_found += found
+            total_written += written
+            total_failed += failed
+
+        duration = round(time() - start_time)
+        slack_log(
+            f"✅ Sync abgeschlossen in {duration}s\n"
+            f"- Gefunden: {total_found}\n"
+            f"- Eingefügt/Aktualisiert: {total_written}\n"
+            f"- Fehlerhaft: {total_failed}",
+            level="SUCCESS"
+        )
+    except Exception as e:
+        slack_log(f"❌ Fehler beim Marktstammdatenregister Sync: {e}", level="ERROR")
     finally:
         cleanup()
+
 

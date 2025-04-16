@@ -2,48 +2,42 @@ import requests
 import datetime
 import json
 from dotenv import load_dotenv
+from time import time
 import os
+from slack_logger import slack_log
 
 # Load from the nearest .env file (searches parent directories too)
 load_dotenv()
 
 def main():
-    # ---------------------------
-    # 1) CONFIGURATION VARIABLES
-    # ---------------------------
-    # Directus instance
+    start_time = time()
+    slack_log("🌡️ Start Geosphere-Datensynchronisation", level="INFO")
+    
     directus_api_url = os.getenv("DIRECTUS_API_URL")
     directus_api_key = os.getenv("DIRECTUS_API_TOKEN")
-    
-    # Number of days to fetch from the Geosphere API
     days_back = 500
-    
-    # Geosphere endpoint (for daily data klima-v2-1d)
     geosphere_base_url = "https://dataset.api.hub.geosphere.at/v1/station/historical/klima-v2-1d"
     
-    # ---------------------------
-    # 2) FETCH STATIONS FROM DIRECTUS
-    # ---------------------------
-    print("[DEBUG] Fetching station list from Directus...")
-    stations_endpoint = f"{directus_api_url}/items/at_geosphere_stations?limit=-1"
     headers = {
         "Authorization": f"Bearer {directus_api_key}"
     }
+    
+    print("[DEBUG] Fetching station list from Directus...")
+    stations_endpoint = f"{directus_api_url}/items/at_geosphere_stations?limit=-1"
     
     try:
         station_response = requests.get(stations_endpoint, headers=headers)
         station_response.raise_for_status()
     except Exception as e:
-        print("[ERROR] Could not fetch stations from Directus:", e)
+        error_msg = f"❌ Fehler beim Abrufen der Stationen aus Directus: {e}"
+        print("[ERROR]", error_msg)
+        slack_log(error_msg, level="ERROR")
         return
     
     stations_data = station_response.json()
     stations = stations_data.get("data", [])
     print(f"[DEBUG] Found {len(stations)} stations in Directus.")
-    
-    # ---------------------------
-    # 3) PREPARE DATE RANGE
-    # ---------------------------
+
     end_date = datetime.date.today() - datetime.timedelta(days=1) # yesterday
     start_date = end_date - datetime.timedelta(days=days_back)
     
@@ -53,10 +47,16 @@ def main():
     
     # Example: 2025-02-01, 2025-02-25
     print(f"[DEBUG] Fetching data from {start_str} to {end_str} (last {days_back} days).")
+
+    if not stations:
+        slack_log("⚠️ Keine Stationen in Directus gefunden.", level="WARNING")
+        return
     
     # ---------------------------
     # 4) LOOP OVER STATIONS
     # ---------------------------
+
+    station_count = 0
 
     for station_entry in stations:
         station_id = station_entry.get("id")
@@ -65,6 +65,7 @@ def main():
             continue
         
         print(f"[DEBUG] Processing station {station_id}...")
+        station_count += 1
 
         params = {
             "start": start_str,  # e.g. '2025-02-01'
@@ -213,5 +214,12 @@ def main():
     
     print("[INFO] Processing complete.")
 
+    duration = round(time() - start_time)
+    slack_log(f"✅ Geosphere Sync abgeschlossen in {duration}s\nVerarbeitete Stationen: {station_count}", level="SUCCESS")
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        slack_log(f"❌ Unerwarteter Fehler im Geosphere-Sync: {e}", level="ERROR")
+        raise

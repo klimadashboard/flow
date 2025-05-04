@@ -186,10 +186,12 @@ def parse_files(prefix, table_name):
                         unit.update({
                             "shutdown_date": elem.findtext("DatumEndgueltigeStilllegung"),
                             "orientation": elem.findtext("Hauptausrichtung"),
+                            "type": elem.findtext("ArtDerSolaranlage"),
                             "power_kw": float(bruttoleistung.replace(",", ".")) if bruttoleistung else None,
-                            "module_count": math.floor(float(module_count.replace(",", "."))) if module_count else None,
-                            "storage_installed": elem.findtext("SpeicherAmGleichenOrt") == "1"
-                        })
+        "module_count": math.floor(float(module_count.replace(",", "."))) if module_count else None,
+        "storage_installed": elem.findtext("SpeicherAmGleichenOrt") == "1"
+    })
+
 
                     elif prefix == "EinheitenWind":
                         bruttoleistung = elem.findtext("Bruttoleistung")

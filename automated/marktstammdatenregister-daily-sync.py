@@ -21,14 +21,8 @@ DIRECTUS_TOKEN = os.getenv("DIRECTUS_API_TOKEN")
 LOG_FILE = "/var/log/marktstammdatenregister-daily-sync.log"
 ZIP_NAME = "Gesamtdatenexport.zip"
 EXTRACT_DIR = "marktstamm_tmp"
-TABLES = {
-    "EinheitenSolar": "energy_solar_units",
-    "EinheitenWind": "energy_wind_units"
-}
-ENTRY_TAG = {
-    "EinheitenSolar": "EinheitSolar",
-    "EinheitenWind": "EinheitWind"
-}
+TABLE_NAME = "energy_solar_units"
+ENTRY_TAG = "EinheitSolar"
 BATCH_SIZE = int(os.getenv("DIRECTUS_BATCH_SIZE", 2000))
 UPDATE_DAYS_BACK = int(os.getenv("UPDATE_DAYS_BACK", 3))
 HEADERS = {
@@ -39,13 +33,9 @@ HEADERS = {
 def log(msg, level="INFO"):
     print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} {level}: {msg}")
 
-# Time threshold
 THRESHOLD_DATE = datetime.today() - timedelta(days=UPDATE_DAYS_BACK)
-
-# Construct dynamic ZIP URL
 today = datetime.today().strftime("%Y%m%d")
 ZIP_URL = f"https://download.marktstammdatenregister.de/Gesamtdatenexport_{today}_25.1.zip"
-
 MAX_DOWNLOAD_RETRIES = 5
 DOWNLOAD_RETRY_DELAY = 600  # 10 minutes
 
@@ -74,7 +64,6 @@ def download_zip():
 
     raise Exception("❌ ZIP-Download nach mehreren Versuchen fehlgeschlagen.")
 
-# Log rotation (optional): truncate log if >10MB
 if os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE) > 10 * 1024 * 1024:
     with open(LOG_FILE, "w") as f:
         f.write("")
@@ -85,22 +74,22 @@ def extract_needed_files():
     os.makedirs(EXTRACT_DIR, exist_ok=True)
     with zipfile.ZipFile(ZIP_NAME, 'r') as zip_ref:
         for member in zip_ref.infolist():
-            if any(member.filename.startswith(prefix) and member.filename.endswith(".xml") for prefix in TABLES):
+            if member.filename.startswith("EinheitenSolar") and member.filename.endswith(".xml"):
                 zip_ref.extract(member, EXTRACT_DIR)
 
-def process_batch(batch, table_name, max_retries=3, retry_delay=5):
+def process_batch(batch, max_retries=3, retry_delay=5):
     if not batch:
         return
 
     try:
         response = requests.post(
-            f"{DIRECTUS_URL}/items/{table_name}",
+            f"{DIRECTUS_URL}/items/{TABLE_NAME}",
             json=batch,
             headers=HEADERS,
             timeout=120
         )
         if response.status_code in [200, 201]:
-            log(f"✅ {len(batch)} Einträge in {table_name} erfolgreich eingefügt.")
+            log(f"✅ {len(batch)} Einträge erfolgreich eingefügt.")
             return
         elif response.status_code == 400 and "RECORD_NOT_UNIQUE" in response.text:
             log(f"↪️ Duplikate gefunden, führe Updates für {len(batch)} Einträge durch.")
@@ -114,7 +103,7 @@ def process_batch(batch, table_name, max_retries=3, retry_delay=5):
                 for attempt in range(max_retries):
                     try:
                         patch = requests.patch(
-                            f"{DIRECTUS_URL}/items/{table_name}/{item_id}",
+                            f"{DIRECTUS_URL}/items/{TABLE_NAME}/{item_id}",
                             json=item,
                             headers=HEADERS,
                             timeout=60
@@ -123,7 +112,7 @@ def process_batch(batch, table_name, max_retries=3, retry_delay=5):
                             success = True
                             break
                         elif patch.status_code == 503:
-                            time.sleep(retry_delay * (2 ** attempt))  # Backoff
+                            time.sleep(retry_delay * (2 ** attempt))
                         else:
                             log(f"⚠️ Update fehlgeschlagen für {item_id}: {patch.text}", level="WARNING")
                             break
@@ -134,28 +123,27 @@ def process_batch(batch, table_name, max_retries=3, retry_delay=5):
                 if not success:
                     failed_updates.append(item_id)
 
-                time.sleep(0.1)  # kurze Pause zwischen PATCHs
+                time.sleep(0.1)
 
             if failed_updates:
                 log(f"⚠️ {len(failed_updates)} Updates endgültig fehlgeschlagen: {failed_updates}", level="WARNING")
         else:
-            log(f"❌ Fehler beim Insert in {table_name}: {response.status_code} - {response.text}", level="ERROR")
+            log(f"❌ Fehler beim Insert: {response.status_code} - {response.text}", level="ERROR")
     except Exception as e:
         log(f"❌ Ausnahme beim Insert: {e}", level="ERROR")
 
-def parse_files(prefix, table_name):
-    tag = ENTRY_TAG[prefix]
+def parse_files():
     found = 0
     written = 0
     failed = 0
 
-    for file in sorted(Path(EXTRACT_DIR).rglob(f"{prefix}*.xml")):
+    for file in sorted(Path(EXTRACT_DIR).rglob("EinheitenSolar*.xml")):
         log(f"🔍 Verarbeite {file.name}")
         context = ET.iterparse(file, events=("end",))
         batch = []
 
         for event, elem in context:
-            if elem.tag == tag:
+            if elem.tag == ENTRY_TAG:
                 try:
                     last_update_raw = elem.findtext("DatumLetzteAktualisierung")
                     if not last_update_raw or parse_date(last_update_raw) < THRESHOLD_DATE:
@@ -167,12 +155,21 @@ def parse_files(prefix, table_name):
                         continue
                     mastr_id = mastr_id.strip()
 
+                    bruttoleistung = elem.findtext("Bruttoleistung")
+                    module_count = elem.findtext("AnzahlModule")
+
                     unit = {
                         "id": mastr_id,
                         "name": elem.findtext("NameStromerzeugungseinheit"),
                         "status": elem.findtext("EinheitBetriebsstatus"),
                         "commissioning_date": elem.findtext("Inbetriebnahmedatum"),
                         "last_update": last_update_raw,
+                        "shutdown_date": elem.findtext("DatumEndgueltigeStilllegung"),
+                        "orientation": elem.findtext("Hauptausrichtung"),
+                        "type": elem.findtext("ArtDerSolaranlage"),
+                        "power_kw": float(bruttoleistung.replace(",", ".")) if bruttoleistung else None,
+                        "module_count": math.floor(float(module_count.replace(",", "."))) if module_count else None,
+                        "storage_installed": elem.findtext("SpeicherAmGleichenOrt") == "1",
                         "federal_state": elem.findtext("Bundesland"),
                         "district": elem.findtext("Landkreis"),
                         "municipality": elem.findtext("Gemeinde"),
@@ -180,36 +177,11 @@ def parse_files(prefix, table_name):
                         "country": "DE"
                     }
 
-                    if prefix == "EinheitenSolar":
-                        bruttoleistung = elem.findtext("Bruttoleistung")
-                        module_count = elem.findtext("AnzahlModule")
-                        unit.update({
-                            "shutdown_date": elem.findtext("DatumEndgueltigeStilllegung"),
-                            "orientation": elem.findtext("Hauptausrichtung"),
-                            "type": elem.findtext("ArtDerSolaranlage"),
-                            "power_kw": float(bruttoleistung.replace(",", ".")) if bruttoleistung else None,
-        "module_count": math.floor(float(module_count.replace(",", "."))) if module_count else None,
-        "storage_installed": elem.findtext("SpeicherAmGleichenOrt") == "1"
-    })
-
-
-                    elif prefix == "EinheitenWind":
-                        bruttoleistung = elem.findtext("Bruttoleistung")
-                        nettonennleistung = elem.findtext("Nettonennleistung")
-                        unit.update({
-                            "power_kw": float(bruttoleistung.replace(",", ".")) if bruttoleistung else None,
-                            "net_power_kw": float(nettonennleistung.replace(",", ".")) if nettonennleistung else None,
-                            "height": float(elem.findtext("Nabenhoehe").replace(",", ".")) if elem.findtext("Nabenhoehe") else None,
-                            "rotor_diameter": float(elem.findtext("Rotordurchmesser").replace(",", ".")) if elem.findtext("Rotordurchmesser") else None,
-                            "lat": float(elem.findtext("Breitengrad")) if elem.findtext("Breitengrad") else None,
-                            "lon": float(elem.findtext("Laengengrad")) if elem.findtext("Laengengrad") else None
-                        })
-
                     batch.append(unit)
                     found += 1
 
                     if len(batch) >= BATCH_SIZE:
-                        process_batch(batch, table_name)
+                        process_batch(batch)
                         written += len(batch)
                         batch.clear()
                 except Exception as e:
@@ -219,10 +191,10 @@ def parse_files(prefix, table_name):
                     elem.clear()
 
         if batch:
-            process_batch(batch, table_name)
+            process_batch(batch)
             written += len(batch)
 
-    log(f"📊 Verarbeitet: {found}, Eingefügt/Aktualisiert: {written} für {prefix}")
+    log(f"📊 Verarbeitet: {found}, Eingefügt/Aktualisiert: {written}")
     return found, written, failed
 
 def cleanup():
@@ -245,11 +217,10 @@ if __name__ == "__main__":
     try:
         download_zip()
         extract_needed_files()
-        for prefix, table in TABLES.items():
-            found, written, failed = parse_files(prefix, table)
-            total_found += found
-            total_written += written
-            total_failed += failed
+        found, written, failed = parse_files()
+        total_found += found
+        total_written += written
+        total_failed += failed
 
         duration = round(time() - start_time)
         slack_log(
@@ -263,5 +234,3 @@ if __name__ == "__main__":
         slack_log(f"❌ Fehler beim Marktstammdatenregister Sync: {e}", level="ERROR")
     finally:
         cleanup()
-
-

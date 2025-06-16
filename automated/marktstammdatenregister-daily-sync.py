@@ -24,7 +24,7 @@ EXTRACT_DIR = "marktstamm_tmp"
 TABLE_NAME = "energy_solar_units"
 ENTRY_TAG = "EinheitSolar"
 BATCH_SIZE = int(os.getenv("DIRECTUS_BATCH_SIZE", 2000))
-UPDATE_DAYS_BACK = int(os.getenv("UPDATE_DAYS_BACK", 3))
+UPDATE_DAYS_BACK = int(os.getenv("UPDATE_DAYS_BACK", 10))
 HEADERS = {
     "Authorization": f"Bearer {DIRECTUS_TOKEN}",
     "Content-Type": "application/json"
@@ -205,10 +205,9 @@ def cleanup():
         os.remove(ZIP_NAME)
 
 if __name__ == "__main__":
-    from time import time
+    start_time = time.time()
 
     slack_log("📥 Sync des Marktstammdatenregisters gestartet.", level="INFO")
-    start_time = time()
 
     total_found = 0
     total_written = 0
@@ -222,7 +221,7 @@ if __name__ == "__main__":
         total_written += written
         total_failed += failed
 
-        duration = round(time() - start_time)
+        duration = round(time.time() - start_time)
         slack_log(
             f"✅ Sync abgeschlossen in {duration}s\n"
             f"- Gefunden: {total_found}\n"

@@ -24,7 +24,7 @@ EXTRACT_DIR = "marktstamm_tmp"
 TABLE_NAME = "energy_solar_units"
 ENTRY_TAG = "EinheitSolar"
 BATCH_SIZE = int(os.getenv("DIRECTUS_BATCH_SIZE", 2000))
-UPDATE_DAYS_BACK = int(os.getenv("UPDATE_DAYS_BACK", 10))
+UPDATE_DAYS_BACK = int(os.getenv("UPDATE_DAYS_BACK", 7))
 HEADERS = {
     "Authorization": f"Bearer {DIRECTUS_TOKEN}",
     "Content-Type": "application/json"

@@ -24,7 +24,7 @@ EXTRACT_DIR = "marktstamm_tmp"
 TABLE_NAME = "energy_solar_units"
 ENTRY_TAG = "EinheitSolar"
 BATCH_SIZE = int(os.getenv("DIRECTUS_BATCH_SIZE", 2000))
-UPDATE_DAYS_BACK = int(os.getenv("UPDATE_DAYS_BACK", 7))
+UPDATE_DAYS_BACK = int(os.getenv("UPDATE_DAYS_BACK", 20))
 HEADERS = {
     "Authorization": f"Bearer {DIRECTUS_TOKEN}",
     "Content-Type": "application/json"
@@ -35,7 +35,7 @@ def log(msg, level="INFO"):
 
 THRESHOLD_DATE = datetime.today() - timedelta(days=UPDATE_DAYS_BACK)
 today = datetime.today().strftime("%Y%m%d")
-ZIP_URL = f"https://download.marktstammdatenregister.de/Gesamtdatenexport_{today}_25.1.zip"
+ZIP_URL = f"https://download.marktstammdatenregister.de/Gesamtdatenexport_{today}_25.2.zip"
 MAX_DOWNLOAD_RETRIES = 5
 DOWNLOAD_RETRY_DELAY = 600  # 10 minutes
 

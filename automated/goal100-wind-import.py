@@ -5,6 +5,8 @@ import requests
 from dotenv import load_dotenv
 from datetime import datetime
 from pyproj import Transformer
+from slack_logger import slack_log  # 👈 Slack integration
+import time
 
 # ============================================================
 # Configuration
@@ -51,7 +53,7 @@ def run_zenodo_get():
     """
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-    # -g "*.csv" ensures we only download CSV files from the record :contentReference[oaicite:1]{index=1}
+    # -g "*.csv" ensures we only download CSV files from the record
     cmd = [
         "zenodo_get",
         ZENODO_DOI,
@@ -233,6 +235,29 @@ def main():
 
     print("✅ Done.")
 
+    # Let caller know how it went
+    return len(records), len(skipped)
+
 
 if __name__ == "__main__":
-    main()
+    start_time = time.time()
+    slack_log("📥 Sync der Windenergie-Einheiten (Zenodo) gestartet.", level="INFO")
+
+    try:
+        inserted, skipped = main()
+        duration = round(time.time() - start_time)
+
+        slack_log(
+            f"✅ Windenergie-Sync (Zenodo) abgeschlossen in {duration}s\n"
+            f"- Importiert: {inserted}\n"
+            f"- Übersprungen (siehe skipped_rows.log): {skipped}",
+            level="SUCCESS",
+        )
+    except Exception as e:
+        duration = round(time.time() - start_time)
+        slack_log(
+            f"❌ Fehler beim Windenergie-Sync (Zenodo) nach {duration}s: {e}",
+            level="ERROR",
+        )
+        # Re-raise so cron/systemd still sees the failure
+        raise

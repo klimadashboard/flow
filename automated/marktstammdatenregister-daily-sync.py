@@ -414,12 +414,23 @@ def sync_to_directus(records):
 
 def cleanup(db=None):
     """
-    Optional cleanup of open-mastr database.
-    By default, open-mastr keeps the database for faster subsequent runs.
+    Cleanup downloaded zip files to save disk space.
+    The database is retained for faster subsequent runs.
     """
-    # The open-mastr library manages its own cleanup
-    # We can optionally delete the database to save disk space
-    # But keeping it allows for faster incremental updates
+    import glob
+    from pathlib import Path
+
+    # Find and delete the downloaded zip files
+    mastr_dir = Path.home() / ".open-MaStR" / "data" / "xml_download"
+    if mastr_dir.exists():
+        zip_files = list(mastr_dir.glob("Gesamtdatenexport_*.zip"))
+        for zip_file in zip_files:
+            try:
+                zip_file.unlink()
+                log(f"Deleted {zip_file.name} to save disk space.")
+            except Exception as e:
+                log(f"Could not delete {zip_file.name}: {e}", level="WARNING")
+
     log("Cleanup complete (database retained for future runs).")
 
 

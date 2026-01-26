@@ -38,6 +38,36 @@ STATUS_MAP = {
     "Unbekannt": "0",
 }
 
+# Region owner mapping: maps wind turbine IDs to region owner UUIDs
+# Add new regions by adding entries to this dict: "region_uuid": {"ID1", "ID2", ...}
+REGION_OWNER_MAP = {
+    # Stadtwerke Stuttgart
+    "dd4fd7ac-aa2b-4762-8902-1be6ef2fcdb2": {
+        "SEE920284488199",
+        "SEE996908093841",
+        "SEE938927894269",
+        "SEE965762012312",
+        "SEE983057620462",
+        "SEE995842886410",
+        "SEE946197232964",
+        "SEE967983876582",
+        "SEE998885409684",
+        "SEE961906592917",
+        "SEE900831369416",
+        "SEE942807556642",
+        "SEE909415974497",
+        "SEE932544425592",
+    },
+}
+
+
+def get_region_owner(turbine_id: str) -> str | None:
+    """Look up region owner UUID for a given turbine ID."""
+    for region_uuid, turbine_ids in REGION_OWNER_MAP.items():
+        if turbine_id in turbine_ids:
+            return region_uuid
+    return None
+
 # Coordinate transformer: EPSG:25832 (ETRS89 / UTM zone 32N) -> EPSG:4326 (lon/lat)
 transformer = Transformer.from_crs("EPSG:25832", "EPSG:4326", always_xy=True)
 
@@ -51,11 +81,20 @@ def run_zenodo_get():
     Download all CSVs for the given Zenodo DOI into DOWNLOAD_DIR using zenodo_get.
     Requires `zenodo_get` to be installed and on PATH.
     """
+    import shutil
+
+    # Check if zenodo_get is available
+    zenodo_cmd = shutil.which("zenodo_get")
+    if not zenodo_cmd:
+        raise RuntimeError(
+            "zenodo_get not found. Install it with: pip install zenodo_get"
+        )
+
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
     # -g "*.csv" ensures we only download CSV files from the record
     cmd = [
-        "zenodo_get",
+        zenodo_cmd,
         ZENODO_DOI,
         "-o",
         DOWNLOAD_DIR,
@@ -186,6 +225,7 @@ def main():
                 if row.get("ags_gemeinde")
                 else None
             ),
+            "region_owner": get_region_owner(id_raw),
             "country": "DE",
             "lat": lat,
             "lon": lon,

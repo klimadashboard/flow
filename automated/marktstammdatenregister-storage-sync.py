@@ -171,7 +171,17 @@ def download_storage_data():
     db = Mastr()
 
     log("Downloading storage data from MaStR...")
-    db.download(data=["storage"], bulk_cleansing=True)
+    db.download(data=["storage", "market"], bulk_cleansing=True)
+
+    # Verify which tables are now available in the local SQLite database
+    from sqlalchemy import inspect as sa_inspect
+    available_tables = sa_inspect(db.engine).get_table_names()
+    log(f"Available SQLite tables after download: {available_tables}")
+    if "market_actors" in available_tables:
+        actor_count = pd.read_sql("SELECT COUNT(*) AS n FROM market_actors", con=db.engine).iloc[0]["n"]
+        log(f"market_actors table present: {actor_count:,} rows")
+    else:
+        log("market_actors table MISSING – Personenart will default to False for all entries!", level="WARNING")
 
     log("Reading storage data from database...")
 
@@ -247,6 +257,14 @@ def download_storage_data():
                 sql="SELECT MastrNummer, Personenart FROM market_actors",
                 con=db.engine
             )
+            log(f"Loaded {len(actors):,} rows from market_actors.")
+
+            # Show Personenart distribution in the actors table itself
+            pa_dist = actors['Personenart'].value_counts(dropna=False)
+            for pa_val, cnt in pa_dist.items():
+                log(f"  market_actors Personenart: {pa_val} = {cnt:,}")
+
+            before_len = len(df)
             df = df.merge(
                 actors,
                 left_on='AnlagenbetreiberMastrNummer',
@@ -254,9 +272,18 @@ def download_storage_data():
                 how='left',
                 suffixes=('', '_actor')
             )
-            log(f"Merged Personenart from market_actors ({len(actors)} actors).")
+            matched = df['Personenart'].notna().sum()
+            log(f"Merged Personenart from market_actors: {matched:,} / {before_len:,} entries matched ({matched/before_len*100:.1f}%).")
+
+            # Show how the merged Personenart breaks down on our storage entries
+            pa_merged = df['Personenart'].value_counts(dropna=False)
+            for pa_val, cnt in pa_merged.items():
+                label = str(pa_val) if pd.notna(pa_val) else "(no match / missing)"
+                log(f"  storage Personenart: {label} = {cnt:,}")
         else:
             log("Personenart already available in storage_extended.")
+            matched = df['Personenart'].notna().sum()
+            log(f"  Personenart filled: {matched:,} / {len(df):,}")
     except Exception as e:
         log(f"Could not get operator person types: {e}", level="WARNING")
 
@@ -456,8 +483,12 @@ def map_to_directus_schema(df):
     if 'Personenart' in df.columns:
         pa = df.loc[mapped.index, 'Personenart'].astype(str).str.lower()
         mapped['_is_natural_person'] = pa.str.contains('natürlich|natuerlich', na=False)
+        n_natural = mapped['_is_natural_person'].sum()
+        n_total = len(mapped)
+        log(f"_is_natural_person: {n_natural:,} natural persons / {n_total:,} total ({n_natural/n_total*100:.1f}%)")
     else:
         mapped['_is_natural_person'] = False
+        log("Personenart column NOT in DataFrame – _is_natural_person defaults to False for ALL entries!", level="WARNING")
 
     # ------------------------------------------------------------------
     # Convert NaN -> None and produce list of dicts
@@ -833,6 +864,14 @@ def apply_plausibility_checks(records):
     # Merge all three groups into the final result
     # ------------------------------------------------------------------
     result = non_batteries + valid + corrected
+
+    # Final distribution summary for debugging
+    from collections import Counter
+    cat_counts = Counter(r.get('category') for r in result)
+    log("─── Final category distribution ───")
+    for cat, cnt in cat_counts.most_common():
+        cap_sum = sum(r.get('usable_storage_capacity_kwh') or 0 for r in result if r.get('category') == cat)
+        log(f"  {str(cat):25s}  {cnt:>8,} units   {cap_sum/1000:>10,.1f} MWh")
     log(f"Plausibility complete: {len(result)} total records")
     return result
 

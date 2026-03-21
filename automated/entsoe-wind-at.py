@@ -63,6 +63,8 @@ if not chunks:
 # --- Daten zusammenführen und vorbereiten ---
 print("📊 Verarbeite Zeitreihe...")
 df = pd.concat(chunks)
+# Remove duplicate timestamps at chunk boundaries before summing
+df = df[~df.index.duplicated(keep="first")]
 df.index.name = "DateTime"
 df = df.resample("D").sum()
 df["Jahresproduktion"] = df["Wind"].rolling("365D").sum()
@@ -81,7 +83,7 @@ print(f"🧮 {len(df)} Tage (inkl. Jahresproduktion) vorbereitet zur Synchronisi
 print("🌐 Lade vorhandene Directus-Einträge...")
 try:
     existing_resp = requests.get(
-        f"{directus_url}/items/ee_produktion?filter[Country][_eq]=AT&filter[Type][_contains]=Windkraft"
+        f"{directus_url}/items/ee_produktion?filter[Country][_eq]=AT&filter[Type][_contains]=windkraft"
         f"&limit=-1&fields=id,DateTime",
         headers=headers
     )

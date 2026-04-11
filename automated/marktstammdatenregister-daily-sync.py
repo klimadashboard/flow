@@ -3,7 +3,8 @@ Marktstammdatenregister Daily Sync using open-mastr library.
 
 Usage:
     pip install open-mastr pandas
-    python marktstammdatenregister-daily-sync-openmastr.py
+    python marktstammdatenregister-daily-sync.py          # incremental (last N days)
+    python marktstammdatenregister-daily-sync.py --full   # all units (backfill)
 """
 
 import os
@@ -25,12 +26,13 @@ DIRECTUS_TOKEN = os.getenv("DIRECTUS_API_TOKEN")
 TABLE_NAME = "energy_solar_units"
 BATCH_SIZE = int(os.getenv("DIRECTUS_BATCH_SIZE", 1000))
 UPDATE_DAYS_BACK = int(os.getenv("UPDATE_DAYS_BACK", 10))
+FULL_LOAD = "--full" in __import__("sys").argv
 HEADERS = {
     "Authorization": f"Bearer {DIRECTUS_TOKEN}",
     "Content-Type": "application/json"
 }
 
-# Threshold date for filtering recently updated entries
+# Threshold date for filtering recently updated entries (ignored in full mode)
 THRESHOLD_DATE = datetime.today() - timedelta(days=UPDATE_DAYS_BACK)
 
 
@@ -70,16 +72,19 @@ def download_solar_data():
             date_column = col
             break
 
-    if date_column is None:
+    if FULL_LOAD:
+        log("Full mode: loading all solar units (no date filter).")
+        df = pd.read_sql(sql="SELECT * FROM solar_extended", con=db.engine)
+    elif date_column is None:
         log(f"Available columns: {columns}", level="WARNING")
         log("Could not find last update column. Loading all entries (slow).", level="WARNING")
-        df = pd.read_sql(sql="solar_extended", con=db.engine)
+        df = pd.read_sql(sql="SELECT * FROM solar_extended", con=db.engine)
     else:
         log(f"Filtering by {date_column} >= {threshold_str}")
         query = f"SELECT * FROM solar_extended WHERE {date_column} >= '{threshold_str}'"
         df = pd.read_sql(sql=query, con=db.engine)
 
-    log(f"Loaded {len(df)} solar units updated in the last {UPDATE_DAYS_BACK} days.")
+    log(f"Loaded {len(df)} solar units{'' if FULL_LOAD else f' updated in the last {UPDATE_DAYS_BACK} days'}.")
 
     return df, db
 
@@ -143,6 +148,9 @@ def map_to_directus_schema(df):
         'Bruttoleistung': 'power_kw',
         'gross_capacity': 'power_kw',
         'capacity_gross': 'power_kw',
+
+        'Nettonennleistung': 'net_power_kw',
+        'net_capacity': 'net_power_kw',
 
         'AnzahlModule': 'module_count',
         'number_modules': 'module_count',
@@ -210,7 +218,7 @@ def map_to_directus_schema(df):
                 continue
 
             # Handle specific field types
-            if target_col == 'power_kw':
+            if target_col in ('power_kw', 'net_power_kw'):
                 try:
                     record[target_col] = float(str(value).replace(',', '.'))
                 except (ValueError, TypeError):
@@ -438,7 +446,8 @@ def main():
     """Main entry point."""
     start_time = time.time()
 
-    slack_log("Sync des Marktstammdatenregisters gestartet (open-mastr).", level="INFO")
+    mode = "full" if FULL_LOAD else "incremental"
+    slack_log(f"Sync des Marktstammdatenregisters gestartet (open-mastr, {mode}).", level="INFO")
 
     try:
         # Step 1: Download solar data and filter to recent updates (done in SQL)

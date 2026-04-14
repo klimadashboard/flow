@@ -1,489 +1,121 @@
 """
-Marktstammdatenregister Daily Sync using open-mastr library.
+Marktstammdatenregister Daily Sync — parent orchestrator.
+
+Downloads the full MaStR bulk export once (solar + storage), then invokes
+the solar and storage sync subscripts sequentially.  Each subscript handles
+its own Directus sync and Slack logging.  This script owns the download and
+the final zip cleanup.
 
 Usage:
-    pip install open-mastr pandas
-    python marktstammdatenregister-daily-sync.py          # incremental (last N days)
-    python marktstammdatenregister-daily-sync.py --full   # all units (backfill)
+    python marktstammdatenregister-daily-sync.py           # incremental (last N days)
+    python marktstammdatenregister-daily-sync.py --full    # full reload, skip unchanged
+    python marktstammdatenregister-daily-sync.py --rebuild # clear tables, re-insert everything
 """
 
 import os
-import math
+import sys
+import subprocess
 import time
-import requests
-import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime
+from pathlib import Path
 from dotenv import load_dotenv
 from open_mastr import Mastr
-from slack_logger import slack_log
 
-# Load environment variables
+try:
+    from slack_logger import slack_log
+except ImportError:
+    def slack_log(msg, level="INFO"):
+        print(f"[SLACK {level}] {msg}")
+
 load_dotenv()
 
-# Configuration
-DIRECTUS_URL = os.getenv("DIRECTUS_API_URL")
-DIRECTUS_TOKEN = os.getenv("DIRECTUS_API_TOKEN")
-TABLE_NAME = "energy_solar_units"
-BATCH_SIZE = int(os.getenv("DIRECTUS_BATCH_SIZE", 1000))
-UPDATE_DAYS_BACK = int(os.getenv("UPDATE_DAYS_BACK", 10))
-FULL_LOAD = "--full" in __import__("sys").argv
-HEADERS = {
-    "Authorization": f"Bearer {DIRECTUS_TOKEN}",
-    "Content-Type": "application/json"
-}
-
-# Threshold date for filtering recently updated entries (ignored in full mode)
-THRESHOLD_DATE = datetime.today() - timedelta(days=UPDATE_DAYS_BACK)
+REBUILD = "--rebuild" in sys.argv
+FULL_LOAD = "--full" in sys.argv or REBUILD
 
 
 def log(msg, level="INFO"):
-    """Log a message with timestamp."""
-    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} {level}: {msg}")
+    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} [daily-sync] {level}: {msg}")
 
 
-def download_solar_data():
-    """
-    Download solar data from MaStR using open-mastr library.
-    Returns a pandas DataFrame with only recently updated solar unit data.
-    """
+def download_mastr_data():
     log("Initializing open-mastr...")
-
-    # Initialize Mastr - downloads to ~/.open-MaStR/data/sqlite
     db = Mastr()
-
-    # Download fresh solar data from MaStR bulk export
-    log("Downloading solar data from MaStR...")
-    db.download(data=["solar"], bulk_cleansing=True)
-
-    log("Reading recent solar data from database...")
-
-    # Filter directly in SQL for much better performance
-    # Try different possible column names for the last update date
-    threshold_str = THRESHOLD_DATE.strftime('%Y-%m-%d')
-
-    # First, check which date column exists in the table
-    test_query = "SELECT * FROM solar_extended LIMIT 1"
-    test_df = pd.read_sql(sql=test_query, con=db.engine)
-    columns = test_df.columns.tolist()
-
-    date_column = None
-    for col in ['DatumLetzteAktualisierung', 'date_last_update', 'DateLastUpdate', 'LastUpdate']:
-        if col in columns:
-            date_column = col
-            break
-
-    if FULL_LOAD:
-        log("Full mode: loading all solar units (no date filter).")
-        df = pd.read_sql(sql="SELECT * FROM solar_extended", con=db.engine)
-    elif date_column is None:
-        log(f"Available columns: {columns}", level="WARNING")
-        log("Could not find last update column. Loading all entries (slow).", level="WARNING")
-        df = pd.read_sql(sql="SELECT * FROM solar_extended", con=db.engine)
-    else:
-        log(f"Filtering by {date_column} >= {threshold_str}")
-        query = f"SELECT * FROM solar_extended WHERE {date_column} >= '{threshold_str}'"
-        df = pd.read_sql(sql=query, con=db.engine)
-
-    log(f"Loaded {len(df)} solar units{'' if FULL_LOAD else f' updated in the last {UPDATE_DAYS_BACK} days'}.")
-
-    return df, db
-
-
-def map_to_directus_schema(df):
-    """
-    Map open-mastr DataFrame columns to the Directus schema.
-    Returns a list of dictionaries ready for Directus insertion.
-    """
-    # Value mappings: convert German text labels to numeric codes
-    # Fill in the numeric codes for each label
-    STATUS_CODES = {
-        "In Betrieb": "35",
-        "Vorübergehend stillgelegt": "37",
-        "Endgültig stillgelegt": "38",
-        "In Planung": "31",
-    }
-
-    TYPE_CODES = {
-        "Gebäudesolaranlage": "853",
-        "Freiflächensolaranlage": "852",
-        "Sonstige Solaranlage": "2484",
-        "Steckerfertige Solaranlage (sog. Balkonkraftwerk)": "2961",
-        "Großparkplatz": "3058",
-        "Gewässer": "3002"
-    }
-
-
-    # Column mapping from open-mastr to Directus schema
-    # open-mastr uses English column names after translation
-    column_mapping = {
-        'EinheitMastrNummer': 'id',
-        'mastr_id': 'id',
-        'unit_registration_id': 'id',
-
-        'NameStromerzeugungseinheit': 'name',
-        'name_unit': 'name',
-        'unit_name': 'name',
-
-        'EinheitBetriebsstatus': 'status',
-        'operating_status': 'status',
-        'unit_operating_status': 'status',
-
-        'Inbetriebnahmedatum': 'commissioning_date',
-        'commissioning_date': 'commissioning_date',
-        'date_commissioning': 'commissioning_date',
-
-        'DatumLetzteAktualisierung': 'last_update',
-        'date_last_update': 'last_update',
-
-        'DatumEndgueltigeStilllegung': 'shutdown_date',
-        'date_decommissioning': 'shutdown_date',
-
-        'Hauptausrichtung': 'orientation',
-        'main_orientation': 'orientation',
-
-        'ArtDerSolaranlage': 'type',
-        'solar_type': 'type',
-        'usage_area': 'type',
-
-        'Bruttoleistung': 'power_kw',
-        'gross_capacity': 'power_kw',
-        'capacity_gross': 'power_kw',
-
-        'Nettonennleistung': 'net_power_kw',
-        'net_capacity': 'net_power_kw',
-
-        'AnzahlModule': 'module_count',
-        'number_modules': 'module_count',
-        'module_count': 'module_count',
-
-        'SpeicherAmGleichenOrt': 'storage_installed',
-        'storage_at_same_location': 'storage_installed',
-
-        'Bundesland': 'federal_state',
-        'federal_state': 'federal_state',
-        'state': 'federal_state',
-
-        'Landkreis': 'district',
-        'district': 'district',
-
-        'Gemeinde': 'municipality',
-        'municipality': 'municipality',
-
-        'Gemeindeschluessel': 'region',
-        'municipality_key': 'region',
-
-        'Postleitzahl': 'postcode',
-        'postcode': 'postcode',
-
-        'NetzbetreiberpruefungStatus': 'grid_operator_review_status',
-        'grid_operator_review_status': 'grid_operator_review_status',
-    }
-
-    # Find actual columns in the DataFrame
-    actual_mapping = {}
-    for source_col, target_col in column_mapping.items():
-        if source_col in df.columns:
-            if target_col not in actual_mapping.values():  # Avoid duplicates
-                actual_mapping[source_col] = target_col
-
-    log(f"Mapped columns: {actual_mapping}")
-
-    records = []
-    for _, row in df.iterrows():
-        # Get the MaStR ID - this is required
-        mastr_id = None
-        for col in ['EinheitMastrNummer', 'mastr_id', 'unit_registration_id']:
-            if col in df.columns and pd.notna(row.get(col)):
-                mastr_id = str(row[col]).strip()
-                break
-
-        if not mastr_id:
-            continue
-
-        # Build the record
-        record = {
-            'id': mastr_id,
-            'country': 'DE'
-        }
-
-        # Map all other fields
-        for source_col, target_col in actual_mapping.items():
-            if target_col == 'id':  # Already handled
-                continue
-
-            value = row.get(source_col)
-
-            if pd.isna(value):
-                record[target_col] = None
-                continue
-
-            # Handle specific field types
-            if target_col in ('power_kw', 'net_power_kw'):
-                try:
-                    record[target_col] = float(str(value).replace(',', '.'))
-                except (ValueError, TypeError):
-                    record[target_col] = None
-
-            elif target_col == 'module_count':
-                try:
-                    record[target_col] = math.floor(float(str(value).replace(',', '.')))
-                except (ValueError, TypeError):
-                    record[target_col] = None
-
-            elif target_col == 'storage_installed':
-                # Handle boolean/string conversion
-                if isinstance(value, bool):
-                    record[target_col] = value
-                elif str(value) in ['1', 'true', 'True', 'ja', 'Ja']:
-                    record[target_col] = True
-                else:
-                    record[target_col] = False
-
-            elif target_col in ['commissioning_date', 'last_update', 'shutdown_date']:
-                # Convert datetime to ISO string
-                if isinstance(value, pd.Timestamp):
-                    record[target_col] = value.strftime('%Y-%m-%d')
-                else:
-                    record[target_col] = str(value)[:10] if value else None
-
-            elif target_col == 'status':
-                # Convert status label to numeric code
-                record[target_col] = STATUS_CODES.get(str(value), str(value)) if value else None
-
-            elif target_col == 'type':
-                # Convert type label to numeric code
-                record[target_col] = TYPE_CODES.get(str(value), str(value)) if value else None
-
-            elif target_col in ['orientation', 'federal_state']:
-                # Keep as text from open-mastr
-                record[target_col] = str(value) if value else None
-
-            else:
-                record[target_col] = str(value) if value else None
-
-        records.append(record)
-
-    return records
-
-
-def get_existing_ids(ids):
-    """
-    Query Directus to find which IDs already exist in the database.
-    Returns a set of existing IDs.
-    """
-    existing = set()
-
-    # Query in chunks to avoid URL length limits
-    chunk_size = 100  # Smaller chunks to avoid URL length issues
-    for i in range(0, len(ids), chunk_size):
-        chunk = ids[i:i + chunk_size]
-        try:
-            response = requests.get(
-                f"{DIRECTUS_URL}/items/{TABLE_NAME}",
-                headers=HEADERS,
-                params={
-                    "filter[id][_in]": ",".join(chunk),
-                    "fields": "id",
-                    "limit": -1  # No limit, get all matches
-                },
-                timeout=60
-            )
-            if response.status_code == 200:
-                data = response.json().get("data", [])
-                existing.update(item["id"] for item in data)
-            else:
-                log(f"Error querying existing IDs: {response.status_code} - {response.text[:200]}", level="WARNING")
-        except Exception as e:
-            log(f"Error checking existing IDs: {e}", level="WARNING")
-
-    log(f"Found {len(existing)} existing IDs out of {len(ids)} checked.")
-    return existing
-
-
-def batch_insert(batch, max_retries=3, retry_delay=2):
-    """
-    Insert multiple items in a single POST request.
-    """
-    if not batch:
-        return 0
-
-    for attempt in range(max_retries):
-        try:
-            response = requests.post(
-                f"{DIRECTUS_URL}/items/{TABLE_NAME}",
-                json=batch,
-                headers=HEADERS,
-                timeout=120
-            )
-
-            if response.status_code in [200, 201]:
-                return len(batch)
-            elif response.status_code == 503:
-                log(f"Server unavailable, retry {attempt + 1}/{max_retries}...", level="WARNING")
-                time.sleep(retry_delay * (2 ** attempt))
-            else:
-                log(f"Batch insert error: {response.status_code} - {response.text[:500]}", level="ERROR")
-                return 0
-        except Exception as e:
-            log(f"Exception on batch insert attempt {attempt + 1}: {e}", level="WARNING")
-            time.sleep(retry_delay * (2 ** attempt))
-
-    return 0
-
-
-def batch_update(batch, max_retries=3, retry_delay=2):
-    """
-    Update multiple items in a single PATCH request.
-    Directus supports PATCH /items/{collection} with an array of objects.
-    """
-    if not batch:
-        return 0
-
-    for attempt in range(max_retries):
-        try:
-            response = requests.patch(
-                f"{DIRECTUS_URL}/items/{TABLE_NAME}",
-                json=batch,
-                headers=HEADERS,
-                timeout=120
-            )
-
-            if response.status_code in [200, 204]:
-                return len(batch)
-            elif response.status_code == 503:
-                log(f"Server unavailable, retry {attempt + 1}/{max_retries}...", level="WARNING")
-                time.sleep(retry_delay * (2 ** attempt))
-            else:
-                log(f"Batch update error: {response.status_code} - {response.text[:500]}", level="ERROR")
-                return 0
-        except Exception as e:
-            log(f"Exception on batch update attempt {attempt + 1}: {e}", level="WARNING")
-            time.sleep(retry_delay * (2 ** attempt))
-
-    return 0
-
-
-def process_batch(batch, max_retries=3, retry_delay=2):
-    """
-    Process a batch of records: check which exist, then insert new and update existing.
-    """
-    if not batch:
-        return 0, 0
-
-    # Get all IDs in this batch
-    batch_ids = [item["id"] for item in batch]
-
-    # Check which IDs already exist in Directus
-    existing_ids = get_existing_ids(batch_ids)
-
-    # Split batch into new items and existing items
-    to_insert = [item for item in batch if item["id"] not in existing_ids]
-    to_update = [item for item in batch if item["id"] in existing_ids]
-
-    inserted = 0
-    updated = 0
-
-    # Insert new items
-    if to_insert:
-        inserted = batch_insert(to_insert, max_retries, retry_delay)
-        if inserted > 0:
-            log(f"Inserted {inserted} new entries.")
-
-    # Update existing items
-    if to_update:
-        updated = batch_update(to_update, max_retries, retry_delay)
-        if updated > 0:
-            log(f"Updated {updated} existing entries.")
-
-    return inserted, updated
-
-def sync_to_directus(records):
-    """
-    Sync records to Directus in batches.
-    """
-    total_inserted = 0
-    total_updated = 0
-
-    log(f"Starting sync of {len(records)} records to Directus...")
-
-    for i in range(0, len(records), BATCH_SIZE):
-        batch = records[i:i + BATCH_SIZE]
-        batch_num = (i // BATCH_SIZE) + 1
-        total_batches = math.ceil(len(records) / BATCH_SIZE)
-
-        log(f"Processing batch {batch_num}/{total_batches} ({len(batch)} records)...")
-
-        inserted, updated = process_batch(batch)
-        total_inserted += inserted
-        total_updated += updated
-
-    return total_inserted, total_updated
-
-
-def cleanup(db=None):
-    """
-    Cleanup downloaded zip files to save disk space.
-    The database is retained for faster subsequent runs.
-    """
-    import glob
-    from pathlib import Path
-
-    # Find and delete the downloaded zip files
+    log("Downloading solar + storage data from MaStR (single bulk export)...")
+    db.download(data=["solar", "storage"], bulk_cleansing=True)
+    log("MaStR download complete.")
+
+
+def run_subscript(script_name):
+    here = os.path.dirname(os.path.abspath(__file__))
+    args = [sys.executable, os.path.join(here, script_name), "--skip-download"]
+    if REBUILD:
+        args.append("--rebuild")
+    elif FULL_LOAD:
+        args.append("--full")
+    log(f"--- Starting {script_name} ---")
+    # Output streams directly to stdout so each subscript's logs appear in line
+    result = subprocess.run(args)
+    log(f"--- {script_name} finished (exit {result.returncode}) ---")
+    return result.returncode
+
+
+def cleanup():
     mastr_dir = Path.home() / ".open-MaStR" / "data" / "xml_download"
-    if mastr_dir.exists():
-        zip_files = list(mastr_dir.glob("Gesamtdatenexport_*.zip"))
-        for zip_file in zip_files:
-            try:
-                zip_file.unlink()
-                log(f"Deleted {zip_file.name} to save disk space.")
-            except Exception as e:
-                log(f"Could not delete {zip_file.name}: {e}", level="WARNING")
-
-    log("Cleanup complete (database retained for future runs).")
+    if not mastr_dir.exists():
+        return
+    today = datetime.today().date()
+    for zip_file in mastr_dir.glob("Gesamtdatenexport_*.zip"):
+        file_date = datetime.fromtimestamp(zip_file.stat().st_mtime).date()
+        if (FULL_LOAD or REBUILD) and file_date == today:
+            log(f"Keeping {zip_file.name} (reusable today).")
+            continue
+        try:
+            zip_file.unlink()
+            log(f"Deleted {zip_file.name}.")
+        except Exception as e:
+            log(f"Could not delete {zip_file.name}: {e}", level="WARNING")
 
 
 def main():
-    """Main entry point."""
     start_time = time.time()
+    mode = "rebuild" if REBUILD else ("full" if FULL_LOAD else "incremental")
+    slack_log(f"MaStR Daily Sync gestartet (Modus: {mode}).", level="INFO")
 
-    mode = "full" if FULL_LOAD else "incremental"
-    slack_log(f"Sync des Marktstammdatenregisters gestartet (open-mastr, {mode}).", level="INFO")
-
+    solar_rc = storage_rc = -1
     try:
-        # Step 1: Download solar data and filter to recent updates (done in SQL)
-        df, db = download_solar_data()
+        download_mastr_data()
 
-        if len(df) == 0:
-            log("No entries to update.")
-            slack_log("Keine neuen Eintraege im Marktstammdatenregister.", level="INFO")
-            return
-
-        # Step 2: Map to Directus schema
-        records = map_to_directus_schema(df)
-        log(f"Prepared {len(records)} records for Directus sync.")
-
-        # Step 3: Sync to Directus
-        total_inserted, total_updated = sync_to_directus(records)
+        solar_rc = run_subscript("marktstammdatenregister-solar-sync.py")
+        storage_rc = run_subscript("marktstammdatenregister-storage-sync.py")
 
         duration = round(time.time() - start_time)
+        all_ok = solar_rc == 0 and storage_rc == 0
 
-        slack_log(
-            f"Sync abgeschlossen in {duration}s\n"
-            f"- Gefiltert: {len(df)}\n"
-            f"- Eingefuegt: {total_inserted}\n"
-            f"- Aktualisiert: {total_updated}",
-            level="SUCCESS"
-        )
+        if all_ok:
+            slack_log(
+                f"MaStR Daily Sync erfolgreich abgeschlossen in {duration}s (Solar + Speicher, Modus: {mode}).",
+                level="SUCCESS",
+            )
+        else:
+            slack_log(
+                f"MaStR Daily Sync in {duration}s abgeschlossen (mit Fehlern)\n"
+                f"- Solar:   {'OK' if solar_rc == 0 else f'FEHLER (exit {solar_rc})'}\n"
+                f"- Speicher: {'OK' if storage_rc == 0 else f'FEHLER (exit {storage_rc})'}",
+                level="ERROR",
+            )
 
-        log(f"Sync completed in {duration}s. Inserted: {total_inserted}, Updated: {total_updated}")
+        log(f"Done in {duration}s. solar_rc={solar_rc}, storage_rc={storage_rc}")
 
     except Exception as e:
-        slack_log(f"Fehler beim Marktstammdatenregister Sync: {e}", level="ERROR")
+        slack_log(f"Fehler beim MaStR Daily Sync: {e}", level="ERROR")
         log(f"Error: {e}", level="ERROR")
         raise
 
     finally:
         cleanup()
+
+    if solar_rc != 0 or storage_rc != 0:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

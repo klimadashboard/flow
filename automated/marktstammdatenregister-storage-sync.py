@@ -134,9 +134,37 @@ def download_storage_data():
     else:
         log("Skipping download (data pre-loaded by parent).")
 
+    # Detect available columns without loading all data
+    probe = pd.read_sql("SELECT * FROM storage_extended LIMIT 1", con=db.engine)
+    all_columns = probe.columns.tolist()
+    date_col = next(
+        (c for c in ["DatumLetzteAktualisierung", "date_last_update"] if c in all_columns),
+        None,
+    )
+
     log("Loading storage data from database...")
-    df = pd.read_sql(sql="storage_extended", con=db.engine)
-    log(f"Loaded {len(df)} storage units from storage_extended.")
+    if not FULL_LOAD and date_col:
+        threshold_str = THRESHOLD_DATE.strftime("%Y-%m-%d")
+        log(f"Incremental filter: {date_col} >= {threshold_str}")
+        df = pd.read_sql(
+            f"SELECT * FROM storage_extended WHERE {date_col} >= '{threshold_str}'",
+            con=db.engine,
+        )
+        log(f"Loaded {len(df):,} storage units updated since {threshold_str}.")
+    elif not FULL_LOAD:
+        log("No update-date column found; loading all entries.", level="WARNING")
+        df = pd.read_sql("SELECT * FROM storage_extended", con=db.engine)
+        log(f"Loaded {len(df):,} storage units.")
+    else:
+        # Full/rebuild: read in chunks to avoid OOM on large tables
+        log("Full mode: reading storage_extended in chunks...")
+        chunks = []
+        chunk_size = 100_000
+        for chunk in pd.read_sql("SELECT * FROM storage_extended", con=db.engine, chunksize=chunk_size):
+            chunks.append(chunk)
+            log(f"  ...read {sum(len(c) for c in chunks):,} rows so far")
+        df = pd.concat(chunks, ignore_index=True)
+        log(f"Loaded {len(df):,} storage units total.")
 
     # Overwrite NutzbareSpeicherkapazitaet with the authoritative Anlage-level values
     zip_path = _find_gesamtdatenexport_zip()
@@ -147,18 +175,6 @@ def download_storage_data():
         log(f"Capacity mapped: {filled:,}/{len(df):,} units have NutzbareSpeicherkapazitaet")
     else:
         log("Could not load capacity from zip — NutzbareSpeicherkapazitaet may be empty.", level="WARNING")
-
-    if not FULL_LOAD:
-        date_col = next(
-            (c for c in ["DatumLetzteAktualisierung", "date_last_update"] if c in df.columns),
-            None,
-        )
-        if date_col:
-            threshold = pd.Timestamp(THRESHOLD_DATE.strftime("%Y-%m-%d"))
-            df = df[pd.to_datetime(df[date_col], errors="coerce") >= threshold]
-            log(f"Incremental filter ({date_col} >= {threshold.date()}): {len(df)} entries remain.")
-        else:
-            log("No update-date column found; loading all entries.", level="WARNING")
 
     return df, db
 

@@ -12,16 +12,14 @@ Usage:
     python marktstammdatenregister-storage-sync.py --skip-download  # skip MaStR download (parent already did it)
 """
 
-import io
 import os
 import sys
 import time
-import zipfile
 import requests
 import pandas as pd
 import numpy as np
-import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
+from sqlalchemy import inspect as sa_inspect
 from dotenv import load_dotenv
 from open_mastr import Mastr
 
@@ -58,60 +56,6 @@ def log(msg, level="INFO"):
 
 
 # ---------------------------------------------------------------------------
-# Capacity loading from AnlagenStromSpeicher_*.xml
-#
-# OET loads NutzbareSpeicherkapazitaet from storage_units (populated via the
-# SOAP API).  Our bulk-XML path never processes AnlagenStromSpeicher_*.xml so
-# storage_units stays empty — but those files ARE present in the zip.  We
-# parse them directly, which is exactly equivalent to OET's storage_units merge.
-# ---------------------------------------------------------------------------
-
-def _find_gesamtdatenexport_zip():
-    xml_dl_dir = os.path.expanduser("~/.open-MaStR/data/xml_download")
-    candidates = [
-        os.path.join(xml_dl_dir, f)
-        for f in os.listdir(xml_dl_dir)
-        if f.startswith("Gesamtdatenexport_") and f.endswith(".zip")
-    ] if os.path.isdir(xml_dl_dir) else []
-    return max(candidates, key=os.path.getmtime) if candidates else None
-
-
-def _load_capacity_from_zip(zip_path):
-    """
-    Parse AnlagenStromSpeicher_*.xml and return {MaStRNummer: capacity (float|None)}.
-    MaStRNummer here is the SSE… number that maps to SpeMastrNummer in storage_extended.
-    """
-    log(f"Loading capacity from AnlagenStromSpeicher files in {os.path.basename(zip_path)}…")
-    spe_to_cap = {}
-    with zipfile.ZipFile(zip_path) as zf:
-        files = sorted(n for n in zf.namelist() if n.startswith("AnlagenStromSpeicher_"))
-        log(f"  {len(files)} AnlagenStromSpeicher files found")
-        for fn in files:
-            # Files are UTF-16 encoded; decode to string, fix XML declaration, re-encode as UTF-8
-            raw = zf.read(fn).decode("utf-16")
-            xml_bytes = (
-                raw.replace("encoding='UTF-16'", "encoding='UTF-8'")
-                   .replace('encoding="UTF-16"', 'encoding="UTF-8"')
-                   .encode("utf-8")
-            )
-            for event, elem in ET.iterparse(io.BytesIO(xml_bytes), events=("end",)):
-                if elem.tag == "AnlageStromSpeicher":
-                    mastr_nr = elem.findtext("MaStRNummer")
-                    cap_text = elem.findtext("NutzbareSpeicherkapazitaet")
-                    if mastr_nr:
-                        try:
-                            cap = float(cap_text.replace(",", ".")) if cap_text else None
-                        except (ValueError, AttributeError):
-                            cap = None
-                        spe_to_cap[mastr_nr] = cap
-                    elem.clear()
-
-    filled = sum(1 for v in spe_to_cap.values() if v is not None)
-    log(f"  {len(spe_to_cap):,} Anlagen loaded; {filled:,} have NutzbareSpeicherkapazitaet")
-    return spe_to_cap
-
-
-# ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
 
@@ -119,11 +63,13 @@ def download_storage_data():
     """
     Download storage data from MaStR and return a DataFrame.
 
-    OET merges storage_extended with storage_units (SOAP-populated) to get
-    NutzbareSpeicherkapazitaet.  In our bulk-XML path storage_units is always
-    empty, but AnlagenStromSpeicher_*.xml in the zip contains the same data.
-    We load storage_extended and overwrite its (empty) NutzbareSpeicherkapazitaet
-    column from the zip — reproducing OET's merge exactly.
+    open-mastr populates two relevant SQLite tables from the bulk export:
+      storage_extended  – one row per generation unit (Erzeugungseinheit)
+      storage_units     – one row per storage plant (Speicheranlage), holds
+                          NutzbareSpeicherkapazitaet
+
+    We load storage_extended, then merge NutzbareSpeicherkapazitaet from
+    storage_units via SpeMastrNummer → MastrNummer, which is how OET does it.
     """
     log("Initializing open-mastr...")
     db = Mastr()
@@ -133,6 +79,10 @@ def download_storage_data():
         db.download(data=["storage"], bulk_cleansing=True)
     else:
         log("Skipping download (data pre-loaded by parent).")
+
+    # Log available tables to help diagnose future format changes
+    available_tables = sa_inspect(db.engine).get_table_names()
+    log(f"Available SQLite tables: {available_tables}")
 
     # Detect available columns without loading all data
     probe = pd.read_sql("SELECT * FROM storage_extended LIMIT 1", con=db.engine)
@@ -166,15 +116,31 @@ def download_storage_data():
         df = pd.concat(chunks, ignore_index=True)
         log(f"Loaded {len(df):,} storage units total.")
 
-    # Overwrite NutzbareSpeicherkapazitaet with the authoritative Anlage-level values
-    zip_path = _find_gesamtdatenexport_zip()
-    if zip_path and "SpeMastrNummer" in df.columns:
-        spe_to_cap = _load_capacity_from_zip(zip_path)
-        df["NutzbareSpeicherkapazitaet"] = df["SpeMastrNummer"].map(spe_to_cap)
-        filled = df["NutzbareSpeicherkapazitaet"].notna().sum()
-        log(f"Capacity mapped: {filled:,}/{len(df):,} units have NutzbareSpeicherkapazitaet")
+    # Merge NutzbareSpeicherkapazitaet from storage_units via SpeMastrNummer.
+    # Drop storage_extended's own column first to avoid conflicts — the
+    # storage_units value is authoritative (plant-level, not unit-level).
+    if "storage_units" in available_tables and "SpeMastrNummer" in df.columns:
+        try:
+            storage_units = pd.read_sql(
+                "SELECT MastrNummer, NutzbareSpeicherkapazitaet FROM storage_units",
+                con=db.engine,
+            )
+            log(f"Loaded {len(storage_units):,} entries from storage_units.")
+            df = df.drop(columns=["NutzbareSpeicherkapazitaet"], errors="ignore")
+            df = df.merge(
+                storage_units,
+                left_on="SpeMastrNummer",
+                right_on="MastrNummer",
+                how="left",
+                suffixes=("", "_plant"),
+            )
+            filled = df["NutzbareSpeicherkapazitaet"].notna().sum()
+            log(f"Capacity merged: {filled:,}/{len(df):,} units have NutzbareSpeicherkapazitaet")
+        except Exception as e:
+            log(f"Could not merge storage_units: {e}", level="WARNING")
     else:
-        log("Could not load capacity from zip — NutzbareSpeicherkapazitaet may be empty.", level="WARNING")
+        native_filled = df["NutzbareSpeicherkapazitaet"].notna().sum() if "NutzbareSpeicherkapazitaet" in df.columns else 0
+        log(f"storage_units table not available; using storage_extended directly ({native_filled:,} capacity values)")
 
     return df, db
 

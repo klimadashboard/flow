@@ -78,8 +78,10 @@ def _read_capacity_from_zip(zip_path):
     """
     spe_to_cap = {}
     with zipfile.ZipFile(zip_path) as zf:
-        files = sorted(n for n in zf.namelist() if n.startswith("AnlagenStromSpeicher_"))
-        log(f"Reading capacity from {len(files)} AnlagenStromSpeicher XML files in zip...")
+        all_names = zf.namelist()
+        files = sorted(n for n in all_names if Path(n).name.startswith("AnlagenStromSpeicher_"))
+        log(f"Reading capacity from {len(files)} AnlagenStromSpeicher XML files in zip "
+            f"(zip contains {len(all_names)} files total)...")
         for fn in files:
             with zf.open(fn) as raw:
                 reader = codecs.getreader("utf-16")(raw)

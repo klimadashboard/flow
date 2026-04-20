@@ -41,7 +41,9 @@ def download_mastr_data():
     log("Initializing open-mastr...")
     db = Mastr()
     log("Downloading solar + storage data from MaStR (single bulk export)...")
-    db.download(data=["solar", "storage"], bulk_cleansing=True)
+    # "storage_units" is a separate open_mastr type (AnlagenStromSpeicher) that
+    # carries NutzbareSpeicherkapazitaet. It is not included in "storage".
+    db.download(data=["solar", "storage", "storage_units"], bulk_cleansing=True)
     log("MaStR download complete.")
 
 

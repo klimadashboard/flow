@@ -163,20 +163,37 @@ def download_storage_data():
         df = pd.concat(chunks, ignore_index=True)
         log(f"Loaded {len(df):,} storage units total.")
 
-    # Read capacity directly from the zip (open_mastr no longer imports storage_units)
-    zip_path = _find_latest_zip()
-    if zip_path and "SpeMastrNummer" in df.columns:
-        log(f"Using zip: {zip_path.name}")
-        spe_to_cap = _read_capacity_from_zip(zip_path)
-        df = df.drop(columns=["NutzbareSpeicherkapazitaet"], errors="ignore")
-        df["NutzbareSpeicherkapazitaet"] = df["SpeMastrNummer"].map(spe_to_cap)
-        filled = df["NutzbareSpeicherkapazitaet"].notna().sum()
-        log(f"Capacity joined: {filled:,}/{len(df):,} units have NutzbareSpeicherkapazitaet")
-    else:
-        if not zip_path:
-            log("No Gesamtdatenexport zip found; NutzbareSpeicherkapazitaet will be NULL", level="WARNING")
-        native_filled = df["NutzbareSpeicherkapazitaet"].notna().sum() if "NutzbareSpeicherkapazitaet" in df.columns else 0
-        log(f"Falling back to storage_extended directly ({native_filled:,} capacity values)")
+    # Merge NutzbareSpeicherkapazitaet from storage_units (populated via the
+    # "storage_units" open_mastr download type → AnlagenStromSpeicher XML).
+    # Falls back to reading the zip directly if the table is empty.
+    df = df.drop(columns=["NutzbareSpeicherkapazitaet"], errors="ignore")
+    if "storage_units" in available_tables and "SpeMastrNummer" in df.columns:
+        storage_units = pd.read_sql(
+            "SELECT MastrNummer, NutzbareSpeicherkapazitaet FROM storage_units",
+            con=db.engine,
+        )
+        if len(storage_units) > 0:
+            log(f"Loaded {len(storage_units):,} entries from storage_units table.")
+            df = df.merge(
+                storage_units,
+                left_on="SpeMastrNummer",
+                right_on="MastrNummer",
+                how="left",
+                suffixes=("", "_plant"),
+            )
+            filled = df["NutzbareSpeicherkapazitaet"].notna().sum()
+            log(f"Capacity merged: {filled:,}/{len(df):,} units have NutzbareSpeicherkapazitaet")
+        else:
+            log("storage_units table is empty; falling back to zip.", level="WARNING")
+            zip_path = _find_latest_zip()
+            if zip_path:
+                log(f"Using zip: {zip_path.name}")
+                spe_to_cap = _read_capacity_from_zip(zip_path)
+                df["NutzbareSpeicherkapazitaet"] = df["SpeMastrNummer"].map(spe_to_cap)
+                filled = df["NutzbareSpeicherkapazitaet"].notna().sum()
+                log(f"Capacity joined from zip: {filled:,}/{len(df):,} units have NutzbareSpeicherkapazitaet")
+            else:
+                log("No zip found either. NutzbareSpeicherkapazitaet will be NULL — check parent download.", level="WARNING")
 
     return df, db
 

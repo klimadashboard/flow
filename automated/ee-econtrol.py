@@ -19,8 +19,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 slack_log("🔄 Start PV & Wasserkraft Upload", level="INFO")
 
 # ── Download Excel (to disk) ───────────────────────────────────────────────────
-excel_path = "MoMeGes_Bilanz-2025.xlsx"
-url = "https://www.e-control.at/documents/1785851/12985028/MoMeGes_Bilanz_2025.xlsx"
+excel_path = "MoMeGes_Bilanz_2026.xlsx"
+url = "https://www.e-control.at/documents/1785851/13428376/MoMeGes_Bilanz_2026.xlsx"
 
 resp = requests.get(url, timeout=60)
 resp.raise_for_status()

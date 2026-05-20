@@ -130,7 +130,7 @@ def process_messages():
     messages = fetch_slack_messages(os.getenv("SLACK_CHANNEL_ID_NEWS"))
     for message in messages:
         message_id = message.get('ts')
-        message_text = message.get('text', '')
+        message_text = re.sub(r'\s*Sent using Claude\s*$', '', message.get('text', '')).strip()
         user_id = message.get('user')
         if not message_id or not message_text or not user_id:
             continue

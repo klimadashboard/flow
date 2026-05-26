@@ -126,11 +126,26 @@ def add_message_to_database(message_id, message_text, user_id, sites):
     except requests.RequestException as e:
         print(f"Error adding message to database: {e}")
 
+STRIP_PATTERN = re.compile(r'\*?Sent using\*?\s+Claude\*?\s*$', re.IGNORECASE)
+
+def clean_message_text(message):
+    """Return message text with 'Sent using Claude' removed from both text and attachments."""
+    parts = []
+    main_text = STRIP_PATTERN.sub('', message.get('text', '')).strip()
+    if main_text:
+        parts.append(main_text)
+    for attachment in message.get('attachments', []):
+        for field in ('text', 'fallback', 'pretext'):
+            att_text = STRIP_PATTERN.sub('', attachment.get(field, '')).strip()
+            if att_text:
+                parts.append(att_text)
+    return '\n'.join(parts)
+
 def process_messages():
     messages = fetch_slack_messages(os.getenv("SLACK_CHANNEL_ID_NEWS"))
     for message in messages:
         message_id = message.get('ts')
-        message_text = re.sub(r'\s*Sent using Claude\s*$', '', message.get('text', '')).strip()
+        message_text = clean_message_text(message)
         user_id = message.get('user')
         if not message_id or not message_text or not user_id:
             continue

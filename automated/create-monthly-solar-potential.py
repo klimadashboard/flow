@@ -130,7 +130,7 @@ def main() -> None:
 
     log("Fetching regions metadata …")
     region_rows = fetch_all_pages("regions", {
-        "fields": "id,code_short,layer",
+        "fields": "id,code,code_short,layer",
         "filter[country][_eq]": "DE",
     })
     regions_by_id: dict[str, dict] = {r["id"]: r for r in region_rows if r.get("id")}
@@ -138,9 +138,9 @@ def main() -> None:
 
     # ------------------------------------------------------------------
     # 3. Build prefix lookup maps and static data index
-    #    state    → match on first 2 chars of AGS code
-    #    district → match on first 5 chars of AGS code
-    #    municipality → exact match
+    #    state       → 2-digit AGS prefix, stored in `code`
+    #    district    → 5-digit AGS prefix, stored in `code`
+    #    municipality → exact 8-digit AGS match, stored in `code_short`
     # ------------------------------------------------------------------
     state_prefix_map:    dict[str, list[str]] = defaultdict(list)
     district_prefix_map: dict[str, list[str]] = defaultdict(list)
@@ -152,20 +152,23 @@ def main() -> None:
         if not uuid:
             continue
         meta  = regions_by_id.get(uuid, {})
-        code  = str(meta.get("code_short") or "").strip()
         layer = meta.get("layer") or "municipality"
         static_by_region[uuid] = {
             "potential_mwh": float(row.get("potential") or 0.0),
             "roofs_count":   int(row["roofs_count"]) if row.get("roofs_count") else 0,
         }
-        if not code:
-            continue
         if layer == "state":
-            state_prefix_map[code[:2]].append(uuid)
+            code = str(meta.get("code") or "").strip()
+            if code:
+                state_prefix_map[code[:2]].append(uuid)
         elif layer == "district":
-            district_prefix_map[code[:5]].append(uuid)
+            code = str(meta.get("code") or "").strip()
+            if code:
+                district_prefix_map[code[:5]].append(uuid)
         else:
-            muni_code_map[code].append(uuid)
+            code = str(meta.get("code_short") or "").strip()
+            if code:
+                muni_code_map[code].append(uuid)
 
     log(f"  Prefix maps built for {len(static_by_region)} regions")
 

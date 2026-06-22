@@ -1,6 +1,7 @@
 import requests
 import datetime
 import json
+import argparse
 from dotenv import load_dotenv
 from time import time
 import os
@@ -10,14 +11,19 @@ from slack_logger import slack_log
 load_dotenv()
 
 def main():
+    parser = argparse.ArgumentParser(description="Sync Geosphere daily climate data to Directus")
+    parser.add_argument("--days", type=int, default=7,
+                        help="How many days back to sync (default: 7 for intraday runs; use 500 for full historical sync)")
+    args = parser.parse_args()
+
     start_time = time()
-    slack_log("🌡️ Start Geosphere-Datensynchronisation", level="INFO")
-    
+    slack_log(f"🌡️ Start Geosphere-Datensynchronisation (--days {args.days})", level="INFO")
+
     directus_api_url = os.getenv("DIRECTUS_API_URL")
     directus_api_key = os.getenv("DIRECTUS_API_TOKEN")
-    days_back = 500
+    days_back = args.days
     geosphere_base_url = "https://dataset.api.hub.geosphere.at/v1/station/historical/klima-v2-1d"
-    
+
     headers = {
         "Authorization": f"Bearer {directus_api_key}"
     }
@@ -158,9 +164,8 @@ def main():
             tlmin_val = tlmin_data[i] if i < len(tlmin_data) else None
             tlmittel_val = tlmittel_data[i] if i < len(tlmittel_data) else None
 
-            # 1) ADD THIS CHECK
-            # If all four parameters are None, skip this date
-            if ((sh_val is None or sh_val == 0) and
+            # Skip dates where all temperature values are missing (e.g. today before data is published)
+            if (sh_val is None and
                 tlmax_val is None and
                 tlmin_val is None and
                 tlmittel_val is None):

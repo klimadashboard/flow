@@ -126,7 +126,7 @@ def add_message_to_database(message_id, message_text, user_id, sites):
     except requests.RequestException as e:
         print(f"Error adding message to database: {e}")
 
-STRIP_PATTERN = re.compile(r'\*?Sent using\*?\s+Claude\*?\s*$', re.IGNORECASE)
+STRIP_PATTERN = re.compile(r'\*?Sent using\*?\s+(?:Claude|<@[UW][A-Za-z0-9]+>)\*?\s*$', re.IGNORECASE)
 
 def clean_message_text(message):
     """Return message text with 'Sent using Claude' removed from both text and attachments."""

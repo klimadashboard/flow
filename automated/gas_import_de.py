@@ -59,7 +59,7 @@ def read_csv_data(path):
     Read data from the given csv and transform it into database format.
     """
     raw_df = pd.read_csv(path, sep=";")
-    raw_df.rename(columns={'                     .': 'date'}, inplace=True)
+    raw_df.rename(columns={raw_df.columns[0]: 'date'}, inplace=True)
     raw_df['date'] = pd.to_datetime(raw_df['date'], format="%d.%m.%Y").astype(str)
     df = raw_df.melt('date').dropna()
     df["Country"] = "DE"
@@ -138,7 +138,7 @@ def insert_gas_datapoints(insert_df):
 def main():
     print(f"---running gas_import_de.py on {datetime.now()}")
     existing_df = get_existing_gas_data("DE")
-    csv_df = read_csv_data("https://www.bundesnetzagentur.de/_tools/SVG/js2/_functions/csv_export.html?view=renderCSV&id=1081248")
+    csv_df = read_csv_data("https://www.bundesnetzagentur.de/SiteGlobals/Functions/SVG/_functions/csv_export.html?view=renderCSV&id=870296")
     # csv_df = csv_df[80:89]
 
     insert_df, update_df = get_insert_update_df(existing_df, csv_df)

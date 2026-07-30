@@ -6,7 +6,16 @@ disruptions caused by illegally parked cars ("Falschparker"), extracts and
 geocodes the incident location and upserts the result into the Directus collection
 `mobility_tram_parking`.
 
-Dedup key: incident_id (= Wiener Linien trafficInfos.name, e.g. "tk_-444190366").
+Dedup key: incident_id (= Wiener Linien trafficInfos.name with any trailing
+"-F01"/"-F02"/... phase suffix stripped -- WL reissues the same real-world
+incident under a new name each time its description moves to a new phase, so
+all phases of one incident collapse onto a single row; see
+canonical_incident_id/build_merged_record).
+
+date_fix is deliberately not filled in from the API's time.resume (that's just
+WL's rolling ETA, revised by opening a new phase) -- it's only set once the
+whole incident stops appearing in the feed at all, which is the closest thing
+to a confirmed "actually resolved" signal available; see resolve_absent_incidents.
 
 Rows are tagged with `import_status`:
   - 'auto'     -> written/maintained by this script
@@ -426,23 +435,126 @@ def is_falschparker(entry):
     return any(keyword in text for keyword in FALSCHPARKER_KEYWORDS)
 
 
-def build_record(entry):
-    time_info = entry.get("time") or {}
+# Wiener Linien re-issues the same real-world incident under a new `name` each
+# time its description moves to a new "phase" (e.g. from the specific
+# "Falschparker at <address>" text to a generic "irregular intervals"
+# follow-up) -- the old phase is closed out with status='resolved' and a new
+# one appears with suffix "-F01", "-F02", etc. All phases sharing a base name
+# are the same physical incident and must collapse onto one Directus row.
+PHASE_SUFFIX_PATTERN = re.compile(r"-F(\d+)$")
+
+
+def canonical_incident_id(name):
+    return PHASE_SUFFIX_PATTERN.sub("", name)
+
+
+def phase_number(name):
+    match = PHASE_SUFFIX_PATTERN.search(name)
+    return int(match.group(1)) if match else 0
+
+
+def _parse_dt(value):
+    if not value:
+        return None
+    try:
+        from datetime import datetime
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def group_by_incident(entries):
+    groups = {}
+    for entry in entries:
+        groups.setdefault(canonical_incident_id(entry["name"]), []).append(entry)
+    for group in groups.values():
+        group.sort(key=lambda e: phase_number(e["name"]))
+    return groups
+
+
+def build_merged_record(canonical_id, phases):
+    """Merges every known phase of one real-world incident into a single record.
+
+    time.resume/time.end are Wiener Linien's rolling ETA, not a confirmed fix --
+    each new phase just revises the estimate. So date_end always reflects the
+    latest phase's estimate, but date_fix is deliberately left unset here; it's
+    only filled in once the whole chain stops appearing in the feed at all (see
+    resolve_absent_incidents), which is the closest thing to a confirmed "it's
+    actually over" signal available from this API.
+    """
+    latest = phases[-1]
+    time_values = [(p.get("time") or {}) for p in phases]
+
+    starts = [dt for dt in (_parse_dt(t.get("start")) for t in time_values) if dt]
+    ends = [(dt, t.get("end")) for t, dt in ((t, _parse_dt(t.get("end"))) for t in time_values) if dt]
+
+    date_start = min(starts).isoformat() if starts else (time_values[0].get("start") if time_values else None)
+    date_end = max(ends, key=lambda pair: pair[0])[1] if ends else (latest.get("time") or {}).get("end")
+
+    lines = sorted({l for p in phases for l in (p.get("relatedLines") or [])})
+    stops = sorted({str(s) for p in phases for s in (p.get("relatedStops") or [])})
+
+    address = category = None
+    for phase in phases:  # earliest phase first -- keeps the first specific location ever reported
+        candidate_addr, candidate_cat = extract_and_categorize(phase.get("description"))
+        if candidate_addr:
+            address, category = candidate_addr, candidate_cat
+            break
+
     return {
-        "incident_id": entry["name"],
-        "title": entry.get("title"),
-        "description": entry.get("description"),
-        "date_start": time_info.get("start"),
-        "date_end": time_info.get("end"),
-        "date_fix": time_info.get("resume"),
-        "lines": ",".join(entry.get("relatedLines") or []),
-        "stops": ",".join(str(s) for s in (entry.get("relatedStops") or [])),
+        "incident_id": canonical_id,
+        "title": latest.get("title"),
+        "description": latest.get("description"),
+        "date_start": date_start,
+        "date_end": date_end,
+        "lines": ",".join(lines),
+        "stops": ",".join(stops),
+        "_address_hint": address,
+        "_category_hint": category,
     }
 
 
 # ---------------------------------------------------------------------------
 # Directus sync
 # ---------------------------------------------------------------------------
+
+def get_open_auto_incidents():
+    """All rows this script still considers unresolved (import_status='auto',
+    date_fix still null) -- used to detect incidents that quietly stopped
+    appearing in the feed at all, which is treated as confirmation they're over."""
+    rows = []
+    offset = 0
+    while True:
+        r = requests.get(
+            f"{DIRECTUS_URL}/items/{COLLECTION}",
+            headers=HEADERS,
+            params={
+                "filter[import_status][_eq]": "auto",
+                "filter[date_fix][_null]": "true",
+                "fields": "id,incident_id,date_end",
+                "limit": 1000,
+                "offset": offset,
+            },
+            timeout=60,
+        )
+        r.raise_for_status()
+        batch = r.json().get("data", [])
+        rows.extend(batch)
+        if len(batch) < 1000:
+            break
+        offset += 1000
+    return rows
+
+
+def resolve_absent_incidents(current_canonical_ids):
+    resolved = 0
+    for row in get_open_auto_incidents():
+        if row["incident_id"] in current_canonical_ids:
+            continue
+        if update_record(row["id"], {"date_fix": row.get("date_end")}):
+            resolved += 1
+    return resolved
+
 
 def get_existing_by_incident_id(incident_ids):
     existing = {}
@@ -516,11 +628,14 @@ def main():
     nominatim_geocode = make_nominatim_geocoder()
     nominatim_cache = load_nominatim_cache()
 
+    groups = group_by_incident(falschparker_entries)
+    multi_phase_groups = sum(1 for phases in groups.values() if len(phases) > 1)
+
     records = []
     geocode_failures = 0
-    for entry in falschparker_entries:
-        record = build_record(entry)
-        address, category = extract_and_categorize(record["description"])
+    for canonical_id, phases in groups.items():
+        record = build_merged_record(canonical_id, phases)
+        address, category = record.pop("_address_hint"), record.pop("_category_hint")
         lat, lon, address_full = geocode(
             address, category, graph, knoten, haltestellen_coords, nominatim_geocode, nominatim_cache
         )
@@ -557,9 +672,13 @@ def main():
             continue
 
         payload = {}
-        for field in ("date_end", "date_fix", "description"):
+        for field in ("date_end", "description"):
             if not _same_value(existing_row.get(field), record[field]):
                 payload[field] = record[field]
+        if existing_row.get("date_fix") is not None:
+            # It reappeared in the feed after we'd confirmed it resolved by
+            # absence -- treat it as reopened rather than leaving a stale fix time.
+            payload["date_fix"] = None
         if existing_row.get("lat") is None and record["lat"] is not None:
             payload.update({
                 "address": record["address"],
@@ -574,14 +693,17 @@ def main():
 
     inserted = insert_records(to_insert)
     updated = sum(1 for record_id, payload in to_update if update_record(record_id, payload))
+    resolved_by_absence = resolve_absent_incidents({r["incident_id"] for r in records})
 
     duration = round(time.time() - start_time)
     summary = (
         f"✅ Falschparker-Sync abgeschlossen in {duration}s{mode}\n"
         f"- Abgerufen: {len(traffic_infos)}\n"
-        f"- Falschparker erkannt: {len(falschparker_entries)}\n"
+        f"- Falschparker-Meldungen erkannt: {len(falschparker_entries)} ({len(groups)} Vorfälle, "
+        f"{multi_phase_groups} davon aus mehreren Phasen zusammengeführt)\n"
         f"- Neu eingefügt: {inserted}\n"
         f"- Aktualisiert: {updated}\n"
+        f"- Als abgeschlossen bestätigt (nicht mehr in der Störungsliste): {resolved_by_absence}\n"
         f"- Übersprungen (bereits geprüft/manuell): {skipped}\n"
         f"- Geocoding fehlgeschlagen: {geocode_failures}"
     )

@@ -7,6 +7,24 @@ source mapping, release cadence, last-checked date) on every run, and to
 let each run sample a different slice of charts instead of re-scanning
 everything.
 
+## Slack posting conventions (always follow these)
+
+- **Post as Klimadashbot, not the personal Slack account.** Use the
+  `SLACK_BOT_TOKEN` from `.env` (the "Klimadashbot" app,
+  `chat.postMessage` via the plain Slack Web API, e.g. `curl -X POST
+  https://slack.com/api/chat.postMessage -H "Authorization: Bearer
+  $SLACK_BOT_TOKEN" ...`) — do **not** use a Slack tool/integration that's
+  tied to David's own account for these proposals.
+- **Keep the top-level channel message minimal.** One or two lines: what
+  the update is (chart/table + source) and that a proposal/result is
+  ready, nothing else.
+- **Put everything else — process, risk assessment, numbers, links to
+  the doc/README — as a threaded reply** under that message (or a
+  follow-up threaded reply once the update is actually run), not in the
+  channel message itself.
+- One Slack thread per data update, as before (one top-level message per
+  proposed update, never bundle several).
+
 ## How this routine works
 
 1. Pick a handful of charts/tables (not all of them, to keep cost down).

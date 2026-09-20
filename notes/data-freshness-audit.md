@@ -96,3 +96,45 @@ need the fresh CSV export from Umweltbundesamt and updated `SOURCE_STATES`/
   (Excel/CSV) — the sandbox can't reach umweltbundesamt.at directly?
 - Is the Aug-2025-vs-Jan-2026 national 2024 figure discrepancy a
   nowcast→final revision, or did I misread two different searches?
+
+## Posting to Slack (added 2026-09-20)
+
+Preference: keep the top-level #team_development message short (what's
+new, one-line risk, one-line ask), and put the full source links / process
+/ risk detail as a **threaded reply**, not all in one message.
+
+Preference: post as the **Klimadashbot** app, not the user-linked Slack
+connector (which sends as David's own account). Use
+`notes/slack_post_as_bot.py` — it calls `chat.postMessage` directly with
+`SLACK_BOT_TOKEN` from the environment:
+
+```python
+from slack_post_as_bot import post_message, post_thread_reply
+
+TEAM_DEVELOPMENT = "C0237PPU1J6"  # #team_development
+ts = post_message(TEAM_DEVELOPMENT, "short proposal summary")
+post_thread_reply(TEAM_DEVELOPMENT, ts, "full details/links/risks")
+```
+
+Requires `SLACK_BOT_TOKEN` (and ideally `SLACK_CHANNEL_ID_NEWS` is already
+proof the same token/app is usable elsewhere) present in the *session's*
+actual environment — not just in a local `.env` on David's machine, and
+not just added to the environment config after a session already started.
+As of 2026-09-20 this was still not visible inside a live session even
+after being reportedly added twice — needs a **fresh session** started
+against the updated environment before it'll show up. Verify with:
+
+```bash
+python3 notes/slack_post_as_bot.py   # prints auth.test result, or raises
+                                       # RuntimeError if the var is missing
+```
+
+Confirmed separately: outbound HTTPS to `slack.com` works fine from this
+sandbox (unlike umweltbundesamt.at/data.gv.at/data.klimadashboard.org,
+which are egress-blocked) — so once the token is actually present, no
+network issue is expected. Not yet verified: whether the bot token has
+`chat:write` scope and whether the bot is a member of / can post to
+`#team_development` (needs `chat:write.public` if not a member — it's a
+public channel so that should be sufficient). First real post attempt
+will reveal this; if it fails, fall back to the MCP Slack connector and
+flag it to David.

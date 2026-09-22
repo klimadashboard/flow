@@ -1,0 +1,28 @@
+{
+  "_comment": "Machine-readable state for the weekly data-freshness routine. The routine reads this first, and rewrites it at the end of every run. notes/data-update-log.md holds the prose; this file holds what must be exact.",
+  "slack_channel": "C0237PPU1J6",
+  "last_run": "2026-09-20",
+  "open_proposals": [
+    {
+      "id": "at-uba-bli-2024",
+      "ts": "1789898794.439279",
+      "sent": "2026-09-20",
+      "verified_sent": false,
+      "summary": "AT Bundeslaender THG-Emissionen 2024 (BLI) - needs source CSV from David",
+      "status": "awaiting_source_file"
+    },
+    {
+      "id": "eurostat-ren-tra-2024",
+      "ts": "1789898805.828689",
+      "sent": "2026-09-20",
+      "verified_sent": false,
+      "summary": "Eurostat nrg_ind_ren REN_TRA 2024 final values - re-run manual/eurostat-import.py",
+      "status": "awaiting_go_ahead"
+    }
+  ],
+  "charts_checked": {
+    "oilImportsDE": "2026-09-20",
+    "deathsHeat": "2026-09-20"
+  },
+  "notes": "verified_sent=false means the proposal was posted by an earlier run whose delivery could not be confirmed; re-check the thread before assuming David saw it."
+}

@@ -7,18 +7,11 @@ writing anything. This file exists so future runs don't re-discover the
 same context. Update it whenever you check a chart (even a "no update
 needed" result, with the date) and whenever a proposal is sent/decided.
 
-**Note on prior branches**: two earlier sessions
-(`claude/clever-shannon-8jhb71`, `claude/clever-shannon-fomrd0`, both
-2026-09-20) did overlapping investigations and drafted notes claiming
-their Slack proposals were "sent" — they weren't. Neither branch was ever
-merged/PR'd, and no matching message exists in `#team_development` history
-up to 2026-09-20. Likely cause: one branch relied on an unverified
-`SLACK_BOT_TOKEN`/custom script that apparently never actually posted.
-Their *analysis* was solid (independently reproduced below) — just the
-"sent" claim was premature. Lesson: use the Slack MCP tool
-(`mcp__Slack__slack_send_message`) directly, it works and reliably posts
-as its own bot identity (not David's personal account) — no need for a
-custom bot-token script.
+**History**: three cloud runs on 2026-09-20 left unmerged branches
+(`claude/clever-shannon-8jhb71`, `-fomrd0`, `-8stuvg`). Their research was
+sound and is consolidated here on `main`; two of them wrongly claimed
+their Slack proposals had been sent. Root cause was environmental, not
+analytical — see below. Since 2026-09-22 this routine runs locally.
 
 ## How this routine works
 
@@ -35,28 +28,44 @@ custom bot-token script.
    or needs writing; assess risk (additive/idempotent upsert vs.
    destructive replace).
 5. Post **one proposal message per data update** to `#team_development`
-   (short top-level message + full process/risk/links as a threaded
-   reply), before writing anything to Directus. Wait for explicit
-   go-ahead there.
-6. Update this file regardless of outcome.
+   as `@klimadashbot` (short top-level message + full process/risk/links
+   as a threaded reply), before writing anything to Directus. Wait for
+   explicit go-ahead there — this routine never writes to Directus on its
+   own, no matter how safe or idempotent the update looks.
+6. Record the returned `ts` in `notes/data-watch-state.json`, then update
+   this file regardless of outcome. At the start of every run, read the
+   replies to every open proposal first — that is where approvals and
+   source files arrive.
 
 ## Environment notes
 
-- Direct HTTPS from the sandbox is allowlisted to very few hosts — plain
-  `curl`/`WebFetch` to `base.klimadashboard.org`, `data.klimadashboard.org`,
-  `umweltbundesamt.at`, `data.gv.at` etc. is generally blocked. `WebSearch`
-  works and is usually enough to confirm whether a source has published
-  something newer (search result snippets often contain the actual
-  figures). Verifying exact Directus row counts needs either a session
-  with those hosts allowlisted, or asking a teammate to paste a query
-  result into Slack.
-- The Slack MCP tools (`mcp__Slack__slack_send_message` etc.) work fine
-  and post as their own app identity — use them directly, no custom bot
-  script needed.
-- GitHub MCP tools are scoped to `klimadashboard/core` and
-  `klimadashboard/flow` only.
+This routine runs **locally** as a scheduled task on David's machine, in
+the real clones at `~/Sites/klimadashboard-core` and
+`~/Sites/klimadashboard-flow`. That means full network access to the
+source websites/APIs, to `base.klimadashboard.org`, and the real `.env`
+with `DIRECTUS_API_TOKEN`. Do not re-introduce the workarounds the
+earlier cloud runs needed — if a host is unreachable now, that is a real
+outage or a changed URL, not a sandbox restriction.
 
-## Chart → source registry (built 2026-09-20, partial — not all 60 dirs scanned)
+**Slack identity — this matters, an earlier run got it wrong.** The Slack
+MCP connector posts as *David's personal account* (only tagged "Sent
+using Claude"), which is wrong for automated proposals. Post as
+`@klimadashbot` instead, via `automated/slack_bot.py`, which uses
+`SLACK_BOT_TOKEN` from `.env`:
+
+```bash
+python3 automated/slack_bot.py post    --channel C0237PPU1J6 --text "..."
+python3 automated/slack_bot.py reply   --channel C0237PPU1J6 --thread <ts> --text "..."
+python3 automated/slack_bot.py replies --channel C0237PPU1J6 --thread <ts>
+```
+
+Every call prints JSON and exits non-zero on failure — a proposal only
+counts as sent when `ok: true` came back and its `ts` was written into
+`notes/data-watch-state.json`. Never record a message as sent without
+that. Reading replies with the same script is how David's answers reach
+the next run; he does not need to tag anyone.
+
+## Chart → source registry (started 2026-09-20, partial — not all 60 dirs scanned)
 
 **Backed by Directus `emissions_data`** (`source` field versioned like
 `"BLI 2025 (1990-2023)"` / `"OLI 2025 (1990-2024)"`):

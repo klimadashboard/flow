@@ -13,6 +13,22 @@ sound and is consolidated here on `main`; two of them wrongly claimed
 their Slack proposals had been sent. Root cause was environmental, not
 analytical — see below. Since 2026-09-22 this routine runs locally.
 
+## Two tasks, two cadences
+
+Since 2026-09-22 this is split across two local scheduled tasks sharing
+these two files:
+
+- `daily-data-proposal-replies` — daily except Monday, 09:00. Reads the
+  Slack threads of open proposals, executes what David approved, writes
+  state back. No research, no new proposals. Exits immediately when
+  nothing is open. This exists so replies are picked up within ~24h
+  instead of waiting for the weekly run.
+- `weekly-data-sources-check` — Mondays 09:00. The full review below.
+  Also does the reply pickup first, so Monday needs no daily run.
+
+Both commit only `notes/` to `main`. If you are the daily task, stop
+reading here — the rest of this file is the weekly run's job.
+
 ## How this routine works
 
 1. Pick a handful of charts/tables per run, not all of them (keep cost

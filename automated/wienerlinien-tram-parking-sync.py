@@ -32,6 +32,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import requests
 from dotenv import load_dotenv
@@ -276,12 +277,8 @@ def kategorisiere_ort(ort, ist_haltestelle):
     return "nur_strasse_ohne_nr"
 
 
-def extract_and_categorize(description):
-    """Returns (address, address_category) for a Falschparker description, or (None, None)."""
-    ort, ist_haltestelle = extract_location(description)
-    if not ort:
-        return None, None
-
+def clean_and_categorize(ort, ist_haltestelle):
+    """Shared cleanup/categorization for an already-extracted location string."""
     ort = ort.strip()
     ort = korrigiere_ort(ort)
     ort = clean_false_hash(ort)
@@ -303,6 +300,28 @@ def extract_and_categorize(description):
         return None, None
 
     return ort, category
+
+
+def extract_and_categorize(description):
+    """Returns (address, address_category) for a Falschparker description, or (None, None)."""
+    ort, ist_haltestelle = extract_location(description)
+    if not ort:
+        return None, None
+    return clean_and_categorize(ort, ist_haltestelle)
+
+
+def resolve_phase_address(phase):
+    """Prefers the API's own structured `location` field (cleaner, and often
+    still populated on generic follow-up phases whose description text has
+    nothing left to regex) over parsing `description`."""
+    location = (phase.get("location") or "").strip()
+    if location:
+        # No textual cue here (no "Haltestellenbereich" marker), so this can't
+        # be categorized as 'haltestelle' -- only as kreuzung/platz/strasse.
+        result = clean_and_categorize(location, ist_haltestelle=False)
+        if result[0]:
+            return result
+    return extract_and_categorize(phase.get("description"))
 
 
 # ---------------------------------------------------------------------------
@@ -419,7 +438,13 @@ def lookup_district(lat, lon, district_polygons):
 # ---------------------------------------------------------------------------
 
 def fetch_traffic_infos():
-    params = {"name": ["stoerunglang", "stoerungkurz"]}
+    # stoerunglang = "Störungen der Leitstelle" (dispatch-authored, has real
+    # narrative text/addresses). stoerungkurz = "AZBLinienspezialtext" (auto-
+    # generated per affected stop, e.g. "R1620-160" -- no address text ever,
+    # and the same real incident gets one entry per downstream stop it
+    # affects, so it's a duplication-prone, ungeocodable channel). Only the
+    # former is worth importing.
+    params = {"name": "stoerunglang"}
     r = requests.get(WIENERLINIEN_TRAFFICINFO_URL, params=params, timeout=30,
                       headers={"Accept": "application/json"})
     r.raise_for_status()
@@ -479,6 +504,45 @@ def group_by_incident(entries):
     return groups
 
 
+VIENNA_TZ = ZoneInfo("Europe/Vienna")
+
+
+def compose_description(phases):
+    """f59-style running text: the first phase's description, then one
+    "Update (HH:MM): ..." line per later phase. The first phase is the only one
+    with the address/reason text; the follow-ups just say "Nach einer
+    Fahrtbehinderung ...", so replacing the description with the latest phase
+    (as before) threw the useful part away."""
+    parts = []
+    for phase in phases:
+        text = (phase.get("description") or "").strip()
+        if not text:
+            continue
+        if phase_number(phase.get("name") or "") == 0:
+            parts.append(text)
+            continue
+        created = _parse_dt((phase.get("time") or {}).get("created"))
+        stamp = created.astimezone(VIENNA_TZ).strftime("%H:%M") if created and created.tzinfo else None
+        parts.append(f"Update ({stamp}): {text}" if stamp else f"Update: {text}")
+    return "\n".join(parts) or None
+
+
+def merge_description(existing, new):
+    """Never loses text already stored: earlier phases drop out of the feed, so
+    a later poll only sees part of the chain. Appends new lines that aren't in
+    the stored text yet."""
+    if not existing:
+        return new
+    if not new:
+        return existing
+    merged = existing
+    for line in new.split("\n"):
+        body = line.split("): ", 1)[1] if line.startswith("Update (") else line
+        if body.removeprefix("Update: ") not in merged:
+            merged += "\n" + line
+    return merged
+
+
 def build_merged_record(canonical_id, phases):
     """Merges every known phase of one real-world incident into a single record.
 
@@ -512,7 +576,7 @@ def build_merged_record(canonical_id, phases):
 
     address = category = None
     for phase in phases:  # earliest phase first -- keeps the first specific location ever reported
-        candidate_addr, candidate_cat = extract_and_categorize(phase.get("description"))
+        candidate_addr, candidate_cat = resolve_phase_address(phase)
         if candidate_addr:
             address, category = candidate_addr, candidate_cat
             break
@@ -520,7 +584,7 @@ def build_merged_record(canonical_id, phases):
     return {
         "incident_id": canonical_id,
         "title": latest.get("title"),
-        "description": latest.get("description"),
+        "description": compose_description(phases),
         "date_start": date_start,
         "date_end": date_end,
         "date_fix": date_fix,
@@ -708,9 +772,11 @@ def main():
             continue
 
         payload = {}
-        for field in ("date_end", "description"):
-            if not _same_value(existing_row.get(field), record[field]):
-                payload[field] = record[field]
+        if not _same_value(existing_row.get("date_end"), record["date_end"]):
+            payload["date_end"] = record["date_end"]
+        description = merge_description(existing_row.get("description"), record["description"])
+        if description != existing_row.get("description"):
+            payload["description"] = description
         if record["date_fix"] is not None:
             if not _same_value(existing_row.get("date_fix"), record["date_fix"]):
                 payload["date_fix"] = record["date_fix"]

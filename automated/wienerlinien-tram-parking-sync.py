@@ -12,10 +12,11 @@ incident under a new name each time its description moves to a new phase, so
 all phases of one incident collapse onto a single row; see
 canonical_incident_id/build_merged_record).
 
-date_fix is deliberately not filled in from the API's time.resume (that's just
-WL's rolling ETA, revised by opening a new phase) -- it's only set once the
-whole incident stops appearing in the feed at all, which is the closest thing
-to a confirmed "actually resolved" signal available; see resolve_absent_incidents.
+date_fix is the resume time of the "Nach einer Fahrtbehinderung" follow-up phase
+(the actual clear time; see build_merged_record). Incidents that vanish without
+ever showing that phase get date_fix = the poll that first saw them missing;
+see resolve_absent_incidents. Never derive it from time.end -- WL sets that to
+the end of the service day on follow-up phases.
 
 Rows are tagged with `import_status`:
   - 'auto'     -> written/maintained by this script
@@ -29,6 +30,7 @@ import os
 import re
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
@@ -443,6 +445,11 @@ def is_falschparker(entry):
 # are the same physical incident and must collapse onto one Directus row.
 PHASE_SUFFIX_PATTERN = re.compile(r"-F(\d+)$")
 
+# Once the obstruction is cleared WL opens a follow-up phase with this text;
+# its time.resume/time.created is the minute the line could move again (same
+# instant as the historical f59 "traffic_start" field the manual rows use).
+CLEARED_PHASE_MARKER = "nach einer fahrtbehinderung"
+
 
 def canonical_incident_id(name):
     return PHASE_SUFFIX_PATTERN.sub("", name)
@@ -475,12 +482,12 @@ def group_by_incident(entries):
 def build_merged_record(canonical_id, phases):
     """Merges every known phase of one real-world incident into a single record.
 
-    time.resume/time.end are Wiener Linien's rolling ETA, not a confirmed fix --
-    each new phase just revises the estimate. So date_end always reflects the
-    latest phase's estimate, but date_fix is deliberately left unset here; it's
-    only filled in once the whole chain stops appearing in the feed at all (see
-    resolve_absent_incidents), which is the closest thing to a confirmed "it's
-    actually over" signal available from this API.
+    date_fix comes from the "Nach einer Fahrtbehinderung" follow-up phase (see
+    CLEARED_PHASE_MARKER) -- that phase's resume time is the actual clear time.
+    Its time.end is NOT: WL sets it to the end of the service day (23:55 local),
+    so date_end (max end across phases) is usually that and must never be used
+    as a fix time. Incidents that vanish without ever showing a follow-up phase
+    get date_fix stamped by resolve_absent_incidents instead.
     """
     latest = phases[-1]
     time_values = [(p.get("time") or {}) for p in phases]
@@ -490,6 +497,15 @@ def build_merged_record(canonical_id, phases):
 
     date_start = min(starts).isoformat() if starts else (time_values[0].get("start") if time_values else None)
     date_end = max(ends, key=lambda pair: pair[0])[1] if ends else (latest.get("time") or {}).get("end")
+
+    cleared = [
+        dt
+        for p in phases
+        if CLEARED_PHASE_MARKER in (p.get("description") or "").lower()
+        for dt in [_parse_dt((p.get("time") or {}).get("resume") or (p.get("time") or {}).get("created"))]
+        if dt
+    ]
+    date_fix = min(cleared).isoformat() if cleared else None
 
     lines = sorted({l for p in phases for l in (p.get("relatedLines") or [])})
     stops = sorted({str(s) for p in phases for s in (p.get("relatedStops") or [])})
@@ -507,6 +523,7 @@ def build_merged_record(canonical_id, phases):
         "description": latest.get("description"),
         "date_start": date_start,
         "date_end": date_end,
+        "date_fix": date_fix,
         "lines": ",".join(lines),
         "stops": ",".join(stops),
         "_address_hint": address,
@@ -547,11 +564,22 @@ def get_open_auto_incidents():
 
 
 def resolve_absent_incidents(current_canonical_ids):
+    """Stamps date_fix with the time the incident was first seen missing from the
+    feed (i.e. now, accurate to the polling interval). date_end is NOT a usable
+    fix time: for the generic "unterschiedliche Intervalle" follow-up phases WL
+    sets time.end to the end of the service day (23:55 local), which inflated
+    every auto row to many hours. date_end only caps it, for the case where
+    WL's own end estimate already passed before we noticed the absence."""
+    now = datetime.now(timezone.utc)
     resolved = 0
     for row in get_open_auto_incidents():
         if row["incident_id"] in current_canonical_ids:
             continue
-        if update_record(row["id"], {"date_fix": row.get("date_end")}):
+        end = _parse_dt(row.get("date_end"))
+        if end and end.tzinfo is None:
+            end = end.replace(tzinfo=timezone.utc)
+        fix = min(now, end) if end else now
+        if update_record(row["id"], {"date_fix": fix.isoformat()}):
             resolved += 1
     return resolved
 
@@ -619,7 +647,15 @@ def main():
     log(f"Fetched {len(traffic_infos)} disruptions, {len(falschparker_entries)} are Falschparker-related.")
 
     if not falschparker_entries:
-        slack_log("ℹ️ Keine Falschparker-Störungen in dieser Abfrage.", level="INFO")
+        # Still close out open incidents -- an empty feed is exactly when the
+        # last ones disappeared, and skipping this delayed their fix time until
+        # the next new Falschparker incident happened to show up.
+        resolved_by_absence = resolve_absent_incidents(set())
+        slack_log(
+            f"ℹ️ Keine Falschparker-Störungen in dieser Abfrage. "
+            f"Als abgeschlossen bestätigt: {resolved_by_absence}",
+            level="INFO",
+        )
         return
 
     graph, knoten = load_strassengraph()
@@ -675,7 +711,10 @@ def main():
         for field in ("date_end", "description"):
             if not _same_value(existing_row.get(field), record[field]):
                 payload[field] = record[field]
-        if existing_row.get("date_fix") is not None:
+        if record["date_fix"] is not None:
+            if not _same_value(existing_row.get("date_fix"), record["date_fix"]):
+                payload["date_fix"] = record["date_fix"]
+        elif existing_row.get("date_fix") is not None:
             # It reappeared in the feed after we'd confirmed it resolved by
             # absence -- treat it as reopened rather than leaving a stale fix time.
             payload["date_fix"] = None

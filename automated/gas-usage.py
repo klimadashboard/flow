@@ -22,7 +22,7 @@ energy_endpoint = f"{api_url}/items/energy"
 
 # CSV file URLs
 csv_url_aggm = "https://energie.wifo.ac.at/data/gas/consumption-aggm.csv"
-csv_url_bna = "https://www.bundesnetzagentur.de/_tools/SVG/js2/_functions/csv_export.html?view=renderCSV&id=870330"
+csv_url_bna = "https://www.bundesnetzagentur.de/SiteGlobals/Functions/SVG/_functions/csv_export.html?view=renderCSV&id=870330"
 
 def fetch_csv(url):
     """Fetch the CSV file from the given URL."""

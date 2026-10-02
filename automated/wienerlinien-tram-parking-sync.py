@@ -76,6 +76,11 @@ STRASSENKNOTEN_CACHE = CACHE_DIR / "strassenknoten.json"
 HALTESTELLEN_CACHE = CACHE_DIR / "haltestellen.csv"
 DISTRICTS_CACHE = CACHE_DIR / "districts.json"
 NOMINATIM_CACHE_FILE = CACHE_DIR / "nominatim_geocode_cache.json"
+SLACK_STATE_FILE = CACHE_DIR / "slack_state.json"
+
+# Runs every 5 min, so Slack gets one summary per day plus errors -- each
+# distinct error at most once per ERROR_REPEAT_SECONDS, and a note on recovery.
+ERROR_REPEAT_SECONDS = 3600
 
 # GIP street-graph data is republished roughly every 2 months; the stops list
 # roughly every 6h. Re-download once the cache is older than these.
@@ -88,8 +93,13 @@ FALSCHPARKER_KEYWORDS = ["falschparker"]
 DRY_RUN = "--dry-run" in sys.argv
 
 
+ERRORS_THIS_RUN = []
+
+
 def log(msg, level="INFO"):
     print(f"[{level}] {msg}")
+    if level == "ERROR":
+        ERRORS_THIS_RUN.append(msg)
 
 
 # ---------------------------------------------------------------------------
@@ -692,20 +702,97 @@ def update_record(record_id, payload):
 # Main
 # ---------------------------------------------------------------------------
 
-def main():
+# ---------------------------------------------------------------------------
+# Slack reporting (daily summary + throttled errors)
+# ---------------------------------------------------------------------------
+
+STAT_KEYS = ("runs", "incidents_seen", "inserted", "updated", "resolved", "geocode_failures", "errors")
+
+
+def _load_slack_state():
+    try:
+        return json.loads(SLACK_STATE_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_slack_state(state):
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        SLACK_STATE_FILE.write_text(json.dumps(state), encoding="utf-8")
+    except OSError as e:
+        print(f"[WARNING] Could not write Slack state: {e}")
+
+
+def _daily_summary(day, stats):
+    return (
+        f"🅿️ Falschparker-Sync – Tagesbericht {day}\n"
+        f"- Läufe: {stats['runs']}\n"
+        f"- Neue Vorfälle: {stats['inserted']}\n"
+        f"- Aktualisiert: {stats['updated']}\n"
+        f"- Als behoben bestätigt (aus der Störungsliste verschwunden): {stats['resolved']}\n"
+        f"- Geocoding fehlgeschlagen: {stats['geocode_failures']}\n"
+        f"- Fehler: {stats['errors']}"
+    )
+
+
+def report(run_stats, errors):
+    """Folds one run into the daily totals and decides what (if anything) goes
+    to Slack: the previous day's summary on the first run after midnight
+    (Vienna), new/repeating errors at most once per hour each, and a recovery
+    note on the first clean run after a failure."""
+    if DRY_RUN:
+        log(f"(dry run) stats={run_stats} errors={errors}")
+        return
+
+    state = _load_slack_state()
+    today = datetime.now(VIENNA_TZ).date().isoformat()
+    stats = state.get("stats") or dict.fromkeys(STAT_KEYS, 0)
+
+    if state.get("day") and state["day"] != today:
+        slack_log(_daily_summary(state["day"], stats), level="ERROR" if stats["errors"] else "SUCCESS")
+        stats = dict.fromkeys(STAT_KEYS, 0)
+
+    for key in STAT_KEYS:
+        stats[key] = stats.get(key, 0) + run_stats.get(key, 0)
+    stats["runs"] += 1
+    stats["errors"] += len(errors)
+
+    now = time.time()
+    last_sent = state.get("errors_last_sent") or {}
+    for msg in errors:
+        key = msg[:120]
+        if key not in last_sent or now - last_sent[key] >= ERROR_REPEAT_SECONDS:
+            slack_log(f"❌ Falschparker-Sync: {msg}", level="ERROR")
+            last_sent[key] = now
+    last_sent = {k: t for k, t in last_sent.items() if now - t < 86400}
+
+    failing = bool(errors)
+    if state.get("failing") and not failing:
+        slack_log("✅ Falschparker-Sync läuft wieder fehlerfrei.", level="SUCCESS")
+
+    _save_slack_state({"day": today, "stats": stats, "errors_last_sent": last_sent, "failing": failing})
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def run():
+    """One sync pass. Returns per-run stats; problems go through log(..., "ERROR")."""
     start_time = time.time()
     mode = " (dry run)" if DRY_RUN else ""
-    slack_log(f"🅿️ Start Wiener Linien Falschparker-Sync{mode}", level="INFO")
+    stats = {}
 
     if not DIRECTUS_URL or not DIRECTUS_TOKEN:
-        slack_log("❌ DIRECTUS_API_URL / DIRECTUS_API_TOKEN nicht gesetzt.", level="ERROR")
-        return
+        log("DIRECTUS_API_URL / DIRECTUS_API_TOKEN nicht gesetzt.", level="ERROR")
+        return stats
 
     try:
         traffic_infos = fetch_traffic_infos()
     except Exception as e:
-        slack_log(f"❌ Fehler beim Abrufen der Wiener Linien API: {e}", level="ERROR")
-        return
+        log(f"Fehler beim Abrufen der Wiener Linien API: {e}", level="ERROR")
+        return stats
 
     falschparker_entries = [e for e in traffic_infos if is_falschparker(e)]
     log(f"Fetched {len(traffic_infos)} disruptions, {len(falschparker_entries)} are Falschparker-related.")
@@ -714,13 +801,8 @@ def main():
         # Still close out open incidents -- an empty feed is exactly when the
         # last ones disappeared, and skipping this delayed their fix time until
         # the next new Falschparker incident happened to show up.
-        resolved_by_absence = resolve_absent_incidents(set())
-        slack_log(
-            f"ℹ️ Keine Falschparker-Störungen in dieser Abfrage. "
-            f"Als abgeschlossen bestätigt: {resolved_by_absence}",
-            level="INFO",
-        )
-        return
+        stats["resolved"] = resolve_absent_incidents(set())
+        return stats
 
     graph, knoten = load_strassengraph()
     haltestellen_coords = load_haltestellen()
@@ -813,12 +895,28 @@ def main():
         f"- Geocoding fehlgeschlagen: {geocode_failures}"
     )
     log(summary)
-    slack_log(summary, level="SUCCESS")
+    stats.update({
+        "incidents_seen": len(groups),
+        "inserted": inserted,
+        "updated": updated,
+        "resolved": resolved_by_absence,
+        "geocode_failures": geocode_failures,
+    })
+    return stats
+
+
+def main():
+    stats = {}
+    crashed = None
+    try:
+        stats = run()
+    except Exception as e:
+        crashed = e
+        log(f"Unerwarteter Fehler: {e}", level="ERROR")
+    report(stats, ERRORS_THIS_RUN)
+    if crashed:
+        raise crashed
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        slack_log(f"❌ Unerwarteter Fehler im Falschparker-Sync: {e}", level="ERROR")
-        raise
+    main()

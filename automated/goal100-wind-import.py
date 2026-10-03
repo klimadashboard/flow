@@ -78,12 +78,12 @@ transformer = Transformer.from_crs("EPSG:25832", "EPSG:4326", always_xy=True)
 
 def run_zenodo_get():
     """
-    Download all CSVs for the given Zenodo DOI into DOWNLOAD_DIR using zenodo_get.
+    Download CSVs (or ZIPs containing CSVs) for the given Zenodo DOI into DOWNLOAD_DIR.
     Requires `zenodo_get` to be installed and on PATH.
     """
     import shutil
+    import zipfile
 
-    # Check if zenodo_get is available
     zenodo_cmd = shutil.which("zenodo_get")
     if not zenodo_cmd:
         raise RuntimeError(
@@ -92,18 +92,20 @@ def run_zenodo_get():
 
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-    # -g "*.csv" ensures we only download CSV files from the record
-    cmd = [
-        zenodo_cmd,
-        ZENODO_DOI,
-        "-o",
-        DOWNLOAD_DIR,
-        "-g",
-        "*.csv",
-    ]
+    # Download everything (no -g filter) so we catch CSV and ZIP releases
+    cmd = [zenodo_cmd, ZENODO_DOI, "-o", DOWNLOAD_DIR]
     print("📥 Running:", " ".join(cmd))
     subprocess.run(cmd, check=True)
-    print("✅ Downloaded CSV files from Zenodo.")
+
+    # Extract any ZIP files found in the download dir
+    for fname in os.listdir(DOWNLOAD_DIR):
+        if fname.lower().endswith(".zip"):
+            zip_path = os.path.join(DOWNLOAD_DIR, fname)
+            print(f"📦 Extracting {fname}...")
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                zf.extractall(DOWNLOAD_DIR)
+
+    print("✅ Downloaded and extracted files from Zenodo.")
 
 
 def get_latest_csv(download_dir: str) -> str:

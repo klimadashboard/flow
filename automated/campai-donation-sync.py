@@ -35,10 +35,15 @@ def get_campai_donation_cents():
         "X-API-Key": CAMP_API_KEY,
         "Content-Type": "application/json",
     }
+    # Campai now requires range.from/range.to ({year, monthIndex}); a bare
+    # {"year": ...} is rejected with 400 "Muss ausgefüllt werden".
     payload = {
         "range": {
-            "year": CAMP_YEAR
-        }
+            "from": {"year": int(CAMP_YEAR), "monthIndex": 1},
+            "to": {"year": int(CAMP_YEAR), "monthIndex": 12},
+        },
+        # default page size is 50 accounts -- make sure 40400 is included
+        "limit": 10000,
     }
 
     resp = requests.post(url, headers=headers, json=payload, timeout=30)

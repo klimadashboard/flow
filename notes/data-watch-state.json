@@ -7,17 +7,22 @@
       "id": "at-uba-bli-2024",
       "ts": "1789898794.439279",
       "sent": "2026-09-20",
-      "verified_sent": false,
+      "verified_sent": true,
       "summary": "AT Bundeslaender THG-Emissionen 2024 (BLI) - needs source CSV from David",
-      "status": "awaiting_source_file"
+      "status": "awaiting_source_file",
+      "last_check": "2026-10-06",
+      "note": "David suggested data.gv.at; already answered in thread (no 2024 BLI dataset there). Still waiting on CSV from David."
     },
     {
       "id": "eurostat-ren-tra-2024",
       "ts": "1789898805.828689",
       "sent": "2026-09-20",
-      "verified_sent": false,
+      "verified_sent": true,
       "summary": "Eurostat nrg_ind_ren REN_TRA 2024 final values - re-run manual/eurostat-import.py",
-      "status": "awaiting_go_ahead"
+      "status": "approved_awaiting_scope_choice",
+      "approved": "2026-09-20 (\"yes, go\")",
+      "last_check": "2026-10-06",
+      "note": "2026-10-06 dry-run: 38 new 2024 + 40 revisions (matches 2026-09-22 diff) plus 4 unannounced gap-fills (BA 2022/2023, IS 2023, XK 2023=0.000). Asked David in thread (ts 1791279069.042249) to pick 1=all 82, 2=without XK 2023 (81), 3=approved diff only (78). Options 2/3 need a filtered run; script has no dry-run/filter flag. Needs /usr/local/bin/python3 (homebrew python lacks requests)."
     }
   ],
   "charts_checked": {

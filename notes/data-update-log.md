@@ -190,3 +190,12 @@ Slack: <https://klimadashboard.slack.com/archives/C0237PPU1J6/p1789898805828689>
   consider moving it to `automated/` as a low-frequency (monthly/
   quarterly) cron — Eurostat's release timing is irregular but the
   upsert logic is already safe to run repeatedly.
+
+## 2026-10-06 — Antworten auf Vorschläge abgeholt
+
+- **eurostat-ren-tra-2024**: Freigabe vom 20.09. ("yes, go") liegt vor. Testlauf nur lesend: 38 neue Zeilen für 2024 und
+  40 Korrekturen 2021–2023, wie im Diff vom 22.09. Zusätzlich 4 Lückenfüller, die dort nicht angekündigt waren
+  (BA 2022/2023, IS 2023, XK 2023 = 0,000, vermutlich ein Platzhalter). Deshalb noch **nicht geschrieben**. Im Thread
+  gefragt, welche Variante (1 = alle 82 Zeilen / 2 = ohne XK 2023 / 3 = nur die 78 freigegebenen). EA20 fehlt bei Eurostat,
+  die bestehenden Zeilen bleiben unangetastet.
+- **at-uba-bli-2024**: keine neue Antwort von David. Weiterhin offen, wartet auf die CSV.

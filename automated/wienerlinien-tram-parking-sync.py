@@ -81,6 +81,13 @@ SLACK_STATE_FILE = CACHE_DIR / "slack_state.json"
 # Runs every 5 min, so Slack gets one summary per day plus errors -- each
 # distinct error at most once per ERROR_REPEAT_SECONDS, and a note on recovery.
 ERROR_REPEAT_SECONDS = 3600
+# Single WL API hiccups (timeouts, 429) are normal at a 5-min poll rate; only
+# treat it as an error once this many runs in a row couldn't fetch the feed.
+API_FAIL_ALERT_RUNS = 3
+
+# Categories geocode() actually tries to place; a street name without house
+# number is left without coordinates by design and isn't a failure.
+GEOCODABLE_CATEGORIES = ("kreuzung", "kreuzung_2", "haltestelle", "strasse_hausnummer", "platz")
 
 # GIP street-graph data is republished roughly every 2 months; the stops list
 # roughly every 6h. Re-download once the cache is older than these.
@@ -269,7 +276,9 @@ def insert_hash(ort):
     pattern = rf"(.*?(?:gasse|stra(?:ß|ss)e|platz))\s+"
     match = re.match(pattern, ort, re.IGNORECASE)
     if match:
-        return match.group(1) + " # " + ort[match.end():].strip()
+        # strip a leftover "/" separator: "Kreuzgasse / Vinzenzgasse" would
+        # otherwise become "Kreuzgasse # / Vinzenzgasse" and never match
+        return match.group(1) + " # " + ort[match.end():].strip().lstrip("/").strip()
     return ort
 
 
@@ -706,7 +715,7 @@ def update_record(record_id, payload):
 # Slack reporting (daily summary + throttled errors)
 # ---------------------------------------------------------------------------
 
-STAT_KEYS = ("runs", "incidents_seen", "inserted", "updated", "resolved", "geocode_failures", "errors")
+STAT_KEYS = ("runs", "incidents_seen", "inserted", "updated", "resolved", "geocode_failures", "api_failures", "errors")
 
 
 def _load_slack_state():
@@ -731,7 +740,8 @@ def _daily_summary(day, stats):
         f"- Neue Vorfälle: {stats['inserted']}\n"
         f"- Aktualisiert: {stats['updated']}\n"
         f"- Als behoben bestätigt (aus der Störungsliste verschwunden): {stats['resolved']}\n"
-        f"- Geocoding fehlgeschlagen: {stats['geocode_failures']}\n"
+        f"- Geocoding fehlgeschlagen (neue Vorfälle mit Adresse): {stats['geocode_failures']}\n"
+        f"- WL-API kurzzeitig nicht erreichbar: {stats.get('api_failures', 0)} Läufe\n"
         f"- Fehler: {stats['errors']}"
     )
 
@@ -753,6 +763,17 @@ def report(run_stats, errors):
         slack_log(_daily_summary(state["day"], stats), level="ERROR" if stats["errors"] else "SUCCESS")
         stats = dict.fromkeys(STAT_KEYS, 0)
 
+    errors = list(errors)
+    streak = state.get("api_fail_streak", 0)
+    if run_stats.get("api_failures"):
+        streak += 1
+        if streak >= API_FAIL_ALERT_RUNS:
+            # constant text so the hourly throttle in the loop below applies
+            errors.append(f"WL-API seit mindestens {API_FAIL_ALERT_RUNS} Läufen nicht erreichbar: "
+                          f"{run_stats.get('api_error', '')}")
+    else:
+        streak = 0
+
     for key in STAT_KEYS:
         stats[key] = stats.get(key, 0) + run_stats.get(key, 0)
     stats["runs"] += 1
@@ -771,7 +792,10 @@ def report(run_stats, errors):
     if state.get("failing") and not failing:
         slack_log("✅ Falschparker-Sync läuft wieder fehlerfrei.", level="SUCCESS")
 
-    _save_slack_state({"day": today, "stats": stats, "errors_last_sent": last_sent, "failing": failing})
+    _save_slack_state({
+        "day": today, "stats": stats, "errors_last_sent": last_sent,
+        "failing": failing, "api_fail_streak": streak,
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -791,7 +815,8 @@ def run():
     try:
         traffic_infos = fetch_traffic_infos()
     except Exception as e:
-        log(f"Fehler beim Abrufen der Wiener Linien API: {e}", level="ERROR")
+        log(f"Fehler beim Abrufen der Wiener Linien API: {e}", level="WARNING")
+        stats.update({"api_failures": 1, "api_error": str(e)[:200]})
         return stats
 
     falschparker_entries = [e for e in traffic_infos if is_falschparker(e)]
@@ -821,8 +846,7 @@ def run():
         lat, lon, address_full = geocode(
             address, category, graph, knoten, haltestellen_coords, nominatim_geocode, nominatim_cache
         )
-        if address and lat is None:
-            geocode_failures += 1
+        geocode_failed = bool(address) and lat is None and category in GEOCODABLE_CATEGORIES
 
         record.update({
             "address": address,
@@ -831,6 +855,7 @@ def run():
             "lat": lat,
             "lon": lon,
             "district": lookup_district(lat, lon, district_polygons),
+            "_geocode_failed": geocode_failed,
         })
         records.append(record)
 
@@ -844,7 +869,11 @@ def run():
 
     for record in records:
         existing_row = existing.get(record["incident_id"])
+        geocode_failed = record.pop("_geocode_failed")
         if existing_row is None:
+            # counted once, when the incident first shows up -- it stays in
+            # the feed for many 5-min runs and used to be recounted each time
+            geocode_failures += geocode_failed
             record["import_status"] = "auto"
             to_insert.append(record)
             continue

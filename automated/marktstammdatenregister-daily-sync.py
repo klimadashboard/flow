@@ -19,7 +19,9 @@ import time
 from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
+from sqlalchemy import text
 from open_mastr import Mastr
+from open_mastr.utils.constants import BULK_INCLUDE_TABLES_MAP
 
 try:
     from slack_logger import slack_log
@@ -32,18 +34,69 @@ load_dotenv()
 REBUILD = "--rebuild" in sys.argv
 FULL_LOAD = "--full" in sys.argv or REBUILD
 
+DOWNLOAD_ATTEMPTS = int(os.getenv("MASTR_DOWNLOAD_ATTEMPTS", 3))
+DOWNLOAD_RETRY_WAIT = int(os.getenv("MASTR_DOWNLOAD_RETRY_WAIT", 300))
+
+# Incremental window for the subscripts (they default to 10 days on their own).
+os.environ.setdefault("UPDATE_DAYS_BACK", "5")
+
+# The subscripts only read solar_extended, storage_extended and storage_units.
+# Skipping the EEG files (AnlagenEegSolar_*, AnlagenEegSpeicher_*) saves both
+# download volume and ~20 min of XML parsing per run. open_mastr's download
+# and write steps share this dict, so trimming it here affects both.
+UNUSED_BULK_FILES = {"anlageneegsolar", "anlageneegspeicher"}
+UNUSED_TABLES = ["solar_eeg", "storage_eeg"]
+
 
 def log(msg, level="INFO"):
     print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} [daily-sync] {level}: {msg}")
 
 
+def skip_unused_bulk_files():
+    for key in ("solar", "storage"):
+        BULK_INCLUDE_TABLES_MAP[key] = [
+            f for f in BULK_INCLUDE_TABLES_MAP[key] if f not in UNUSED_BULK_FILES
+        ]
+
+
+def drop_unused_tables(db):
+    # Tables from earlier runs would otherwise linger with stale data.
+    with db.engine.begin() as con:
+        for table in UNUSED_TABLES:
+            con.execute(text(f"DROP TABLE IF EXISTS {table}"))
+
+
+def delete_todays_zip():
+    mastr_dir = Path.home() / ".open-MaStR" / "data" / "xml_download"
+    zip_file = mastr_dir / f"Gesamtdatenexport_{datetime.today().strftime('%Y%m%d')}.zip"
+    if zip_file.exists():
+        zip_file.unlink()
+        log(f"Deleted possibly incomplete {zip_file.name}.")
+
+
 def download_mastr_data():
     log("Initializing open-mastr...")
     db = Mastr()
+    skip_unused_bulk_files()
+    drop_unused_tables(db)
     log("Downloading solar + storage data from MaStR (single bulk export)...")
     # "storage_units" is a separate open_mastr type (AnlagenStromSpeicher) that
     # carries NutzbareSpeicherkapazitaet. It is not included in "storage".
-    db.download(data=["solar", "storage", "storage_units"], bulk_cleansing=True)
+    # The MaStR server occasionally resets connections, so retry a few times.
+    for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
+        try:
+            db.download(data=["solar", "storage", "storage_units"], bulk_cleansing=True)
+            break
+        except Exception as e:
+            if attempt == DOWNLOAD_ATTEMPTS:
+                raise
+            log(
+                f"Download attempt {attempt}/{DOWNLOAD_ATTEMPTS} failed: {e}. "
+                f"Retrying in {DOWNLOAD_RETRY_WAIT}s...",
+                level="WARNING",
+            )
+            delete_todays_zip()
+            time.sleep(DOWNLOAD_RETRY_WAIT)
     log("MaStR download complete.")
 
 

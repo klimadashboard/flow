@@ -21,7 +21,7 @@ headers = {
 energy_endpoint = f"{api_url}/items/energy"
 
 # CSV file URLs
-csv_url_aggm = "https://energie.wifo.ac.at/data/gas/consumption-aggm.csv"
+csv_url_aggm = "https://energie.wifo.ac.at/data/gas/consumption.csv"
 csv_url_bna = "https://www.bundesnetzagentur.de/SiteGlobals/Functions/SVG/_functions/csv_export.html?view=renderCSV&id=870330"
 
 def fetch_csv(url):
@@ -141,8 +141,9 @@ def main():
         existing_data = fetch_existing_data()
         
         csv_data_aggm = fetch_csv(csv_url_aggm)
-        if csv_data_aggm:
-            process_and_upload_aggm(existing_data, csv_data_aggm)
+        if not csv_data_aggm:
+            raise RuntimeError(f"AGGM-CSV konnte nicht geladen werden: {csv_url_aggm}")
+        process_and_upload_aggm(existing_data, csv_data_aggm)
 
         csv_data_bna = fetch_csv(csv_url_bna)
         if csv_data_bna:

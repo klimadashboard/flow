@@ -16,7 +16,7 @@ if not BASE_URL or not TOKEN:
 headers = {"Authorization": f"Bearer {TOKEN}"}
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-slack_log("🔄 Start PV & Wasserkraft Upload", level="INFO")
+slack_log("🔄 Start PV, Wasserkraft & Biomasse Upload", level="INFO")
 
 # ── Download Excel (to disk) ───────────────────────────────────────────────────
 excel_path = "MoMeGes_Bilanz_2026.xlsx"
@@ -88,10 +88,11 @@ def extract_and_prepare(label_text: str, type_tag: str) -> pd.DataFrame:
     df["Type"] = type_tag
     return df
 
-# ── Extract PV & Wasserkraft ───────────────────────────────────────────────────
+# ── Extract PV, Wasserkraft & Biomasse ─────────────────────────────────────────
 df_pv = extract_and_prepare("Photo-\nvoltaik\n(7)", "pv")
 df_wk = extract_and_prepare("Summe\nWasser-\nkraft", "wasserkraft")
-df_all = pd.concat([df_pv, df_wk], ignore_index=True)
+df_bm = extract_and_prepare("Summe \nBiogene\nBrenn-\nstoffe", "biomasse")
+df_all = pd.concat([df_pv, df_wk, df_bm], ignore_index=True)
 df_all["key"] = df_all["Date"].dt.strftime("%Y-%m-%d") + "_" + df_all["Type"]
 
 # ── Fetch existing entries from Directus ───────────────────────────────────────
@@ -103,7 +104,7 @@ while True:
         headers=headers,
         params={
             "filter[Country][_eq]": "AT",
-            "filter[Type][_in]": "pv,wasserkraft",
+            "filter[Type][_in]": "pv,wasserkraft,biomasse",
             "limit": 1000,
             "offset": offset,
             "sort": "DateTime",
@@ -145,11 +146,16 @@ combined = pd.concat(
 )
 combined = combined.drop_duplicates(subset=["Date", "Type"]).sort_values(["Type", "Date"]).reset_index(drop=True)
 
-# Rolling per Type with proper index handling, require full 12 months
-combined["Jahresproduktion"] = (
-    combined.groupby("Type", group_keys=False)
-            .apply(lambda g: g.set_index("Date")["value"].rolling(12, min_periods=12).sum())
-            .reset_index(level=0, drop=True)
+# Rolling per Type on a gapless monthly index, so a missing month yields NaN
+# instead of silently stretching the window over a gap. Require full 12 months.
+def rolling_year(g: pd.DataFrame) -> pd.DataFrame:
+    series = g.set_index("Date")["value"].asfreq("MS")
+    out = series.rolling(12, min_periods=12).sum().rename("Jahresproduktion").reset_index()
+    out["Type"] = g["Type"].iloc[0]
+    return out
+
+combined = pd.concat(
+    [rolling_year(g) for _, g in combined.groupby("Type")], ignore_index=True
 )
 
 # Merge the rolling sum back to the new rows

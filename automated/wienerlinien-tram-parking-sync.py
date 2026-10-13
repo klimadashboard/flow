@@ -12,7 +12,7 @@ incident under a new name each time its description moves to a new phase, so
 all phases of one incident collapse onto a single row; see
 canonical_incident_id/build_merged_record).
 
-date_fix is the resume time of the "Nach einer Fahrtbehinderung" follow-up phase
+date_fix is the creation time of the "Nach einer Fahrtbehinderung" follow-up phase
 (the actual clear time; see build_merged_record). Incidents that vanish without
 ever showing that phase get date_fix = the poll that first saw them missing;
 see resolve_absent_incidents. Never derive it from time.end -- WL sets that to
@@ -490,8 +490,10 @@ def is_falschparker(entry):
 PHASE_SUFFIX_PATTERN = re.compile(r"-F(\d+)$")
 
 # Once the obstruction is cleared WL opens a follow-up phase with this text;
-# its time.resume/time.created is the minute the line could move again (same
-# instant as the historical f59 "traffic_start" field the manual rows use).
+# its time.created is the minute the line could move again (same instant as the
+# historical f59 "traffic_start" field the manual rows use). Its time.resume is
+# NOT stable: WL later moves it to the end of the irregular-intervals period,
+# so it drifts to date_end -- never use it for date_fix.
 CLEARED_PHASE_MARKER = "nach einer fahrtbehinderung"
 
 
@@ -566,7 +568,7 @@ def build_merged_record(canonical_id, phases):
     """Merges every known phase of one real-world incident into a single record.
 
     date_fix comes from the "Nach einer Fahrtbehinderung" follow-up phase (see
-    CLEARED_PHASE_MARKER) -- that phase's resume time is the actual clear time.
+    CLEARED_PHASE_MARKER) -- that phase's created time is the actual clear time.
     Its time.end is NOT: WL sets it to the end of the service day (23:55 local),
     so date_end (max end across phases) is usually that and must never be used
     as a fix time. Incidents that vanish without ever showing a follow-up phase
@@ -585,7 +587,7 @@ def build_merged_record(canonical_id, phases):
         dt
         for p in phases
         if CLEARED_PHASE_MARKER in (p.get("description") or "").lower()
-        for dt in [_parse_dt((p.get("time") or {}).get("resume") or (p.get("time") or {}).get("created"))]
+        for dt in [_parse_dt((p.get("time") or {}).get("created") or (p.get("time") or {}).get("resume"))]
         if dt
     ]
     date_fix = min(cleared).isoformat() if cleared else None
@@ -889,7 +891,11 @@ def run():
         if description != existing_row.get("description"):
             payload["description"] = description
         if record["date_fix"] is not None:
-            if not _same_value(existing_row.get("date_fix"), record["date_fix"]):
+            # only ever move the fix time earlier: a later poll may no longer
+            # see the phase that carried the earliest clear time
+            stored = _parse_dt(existing_row.get("date_fix"))
+            new = _parse_dt(record["date_fix"])
+            if stored is None or (new is not None and new < stored):
                 payload["date_fix"] = record["date_fix"]
         elif existing_row.get("date_fix") is not None:
             # It reappeared in the feed after we'd confirmed it resolved by

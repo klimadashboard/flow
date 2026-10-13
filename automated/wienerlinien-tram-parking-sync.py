@@ -487,7 +487,8 @@ def is_falschparker(entry):
 # follow-up) -- the old phase is closed out with status='resolved' and a new
 # one appears with suffix "-F01", "-F02", etc. All phases sharing a base name
 # are the same physical incident and must collapse onto one Directus row.
-PHASE_SUFFIX_PATTERN = re.compile(r"-F(\d+)$")
+# Suffixes can stack ("I20260304-0013-F01-F01" exists), so strip/compare all of them.
+PHASE_SUFFIX_PATTERN = re.compile(r"(?:-F\d+)+$")
 
 # Once the obstruction is cleared WL opens a follow-up phase with this text;
 # its time.created is the minute the line could move again (same instant as the
@@ -502,8 +503,10 @@ def canonical_incident_id(name):
 
 
 def phase_number(name):
+    """Sort key for a phase: () for the base name, (1,) for -F01, (1, 1) for
+    -F01-F01, ... -- tuples order base < -F01 < -F01-F01 < -F02."""
     match = PHASE_SUFFIX_PATTERN.search(name)
-    return int(match.group(1)) if match else 0
+    return tuple(int(n) for n in re.findall(r"-F(\d+)", match.group(0))) if match else ()
 
 
 def _parse_dt(value):
@@ -539,7 +542,7 @@ def compose_description(phases):
         text = (phase.get("description") or "").strip()
         if not text:
             continue
-        if phase_number(phase.get("name") or "") == 0:
+        if not phase_number(phase.get("name") or ""):
             parts.append(text)
             continue
         created = _parse_dt((phase.get("time") or {}).get("created"))

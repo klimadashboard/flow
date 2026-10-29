@@ -136,22 +136,31 @@ def to_float(v):
 # Region mapping
 # ---------------------------------------------------------------------------
 
-def fetch_regions(layer, fields):
+def fetch_regions(layer, fields, page_size=1000, max_retries=4):
     rows, offset = [], 0
     while True:
-        r = requests.get(
-            f"{DIRECTUS_URL}/items/regions",
-            headers=HEADERS,
-            params={"filter[country][_eq]": "DE", "filter[layer][_eq]": layer,
-                    "fields": fields, "limit": 2000, "offset": offset},
-            timeout=300,
-        )
-        r.raise_for_status()
+        # Outline pages are ~5 MB; the proxy occasionally answers with a 502
+        for attempt in range(max_retries):
+            try:
+                r = requests.get(
+                    f"{DIRECTUS_URL}/items/regions",
+                    headers=HEADERS,
+                    params={"filter[country][_eq]": "DE", "filter[layer][_eq]": layer,
+                            "fields": fields, "limit": page_size, "offset": offset},
+                    timeout=300,
+                )
+                r.raise_for_status()
+                break
+            except requests.RequestException as e:
+                if attempt == max_retries - 1:
+                    raise
+                log(f"Fetching regions failed (attempt {attempt + 1}): {e}. Retrying...", level="WARNING")
+                time.sleep(10 * 2 ** attempt)
         data = r.json()["data"]
         rows += data
-        if len(data) < 2000:
+        if len(data) < page_size:
             return rows
-        offset += 2000
+        offset += page_size
 
 
 def norm_name(s):

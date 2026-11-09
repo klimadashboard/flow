@@ -18,8 +18,8 @@
       "verified_sent": true,
       "summary": "AT Bundeslaender THG-Emissionen 2024 (BLI) - needs source CSV from David",
       "status": "awaiting_source_file",
-      "last_check": "2026-11-07",
-      "note": "David suggested data.gv.at; already answered in thread (no 2024 BLI dataset there). Still waiting on CSV from David. No new reply as of 2026-11-07."
+      "last_check": "2026-11-09",
+      "note": "David suggested data.gv.at; already answered in thread (no 2024 BLI dataset there). Still waiting on CSV from David. No new reply as of 2026-11-09."
     }
   ],
   "charts_checked": {

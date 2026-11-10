@@ -1,8 +1,9 @@
 """
 Marktstammdatenregister Daily Sync — parent orchestrator.
 
-Downloads the full MaStR bulk export once (solar + storage), then invokes
-the solar and storage sync subscripts sequentially.  Each subscript handles
+Downloads the full MaStR bulk export once (solar, storage, biomass, hydro,
+gsgk), then invokes the solar, storage and generic units (biomass + hydro)
+sync subscripts sequentially.  Each subscript handles
 its own Directus sync and Slack logging.  This script owns the download and
 the final zip cleanup.
 
@@ -40,12 +41,17 @@ DOWNLOAD_RETRY_WAIT = int(os.getenv("MASTR_DOWNLOAD_RETRY_WAIT", 300))
 # Incremental window for the subscripts (they default to 10 days on their own).
 os.environ.setdefault("UPDATE_DAYS_BACK", "5")
 
-# The subscripts only read solar_extended, storage_extended and storage_units.
-# Skipping the EEG files (AnlagenEegSolar_*, AnlagenEegSpeicher_*) saves both
+# The subscripts only read solar_extended, storage_extended, storage_units,
+# biomass_extended, hydro_extended and gsgk_extended.
+# Skipping the EEG files (AnlagenEeg*) saves both
 # download volume and ~20 min of XML parsing per run. open_mastr's download
 # and write steps share this dict, so trimming it here affects both.
-UNUSED_BULK_FILES = {"anlageneegsolar", "anlageneegspeicher"}
-UNUSED_TABLES = ["solar_eeg", "storage_eeg"]
+UNUSED_BULK_FILES = {
+    "anlageneegsolar", "anlageneegspeicher", "anlageneegbiomasse",
+    "anlageneegwasser", "anlageneeggeothermiegrubengasdruckentspannung",
+}
+UNUSED_TABLES = ["solar_eeg", "storage_eeg", "biomass_eeg", "hydro_eeg", "gsgk_eeg"]
+DOWNLOAD_TYPES = ["solar", "storage", "storage_units", "biomass", "hydro", "gsgk"]
 
 
 def log(msg, level="INFO"):
@@ -53,7 +59,7 @@ def log(msg, level="INFO"):
 
 
 def skip_unused_bulk_files():
-    for key in ("solar", "storage"):
+    for key in ("solar", "storage", "biomass", "hydro", "gsgk"):
         BULK_INCLUDE_TABLES_MAP[key] = [
             f for f in BULK_INCLUDE_TABLES_MAP[key] if f not in UNUSED_BULK_FILES
         ]
@@ -79,13 +85,13 @@ def download_mastr_data():
     db = Mastr()
     skip_unused_bulk_files()
     drop_unused_tables(db)
-    log("Downloading solar + storage data from MaStR (single bulk export)...")
+    log(f"Downloading {DOWNLOAD_TYPES} from MaStR (single bulk export)...")
     # "storage_units" is a separate open_mastr type (AnlagenStromSpeicher) that
     # carries NutzbareSpeicherkapazitaet. It is not included in "storage".
     # The MaStR server occasionally resets connections, so retry a few times.
     for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
         try:
-            db.download(data=["solar", "storage", "storage_units"], bulk_cleansing=True)
+            db.download(data=DOWNLOAD_TYPES, bulk_cleansing=True)
             break
         except Exception as e:
             if attempt == DOWNLOAD_ATTEMPTS:
@@ -100,9 +106,9 @@ def download_mastr_data():
     log("MaStR download complete.")
 
 
-def run_subscript(script_name):
+def run_subscript(script_name, *extra_args):
     here = os.path.dirname(os.path.abspath(__file__))
-    args = [sys.executable, os.path.join(here, script_name), "--skip-download"]
+    args = [sys.executable, os.path.join(here, script_name), "--skip-download", *extra_args]
     if REBUILD:
         args.append("--rebuild")
     elif FULL_LOAD:
@@ -136,30 +142,32 @@ def main():
     mode = "rebuild" if REBUILD else ("full" if FULL_LOAD else "incremental")
     slack_log(f"MaStR Daily Sync gestartet (Modus: {mode}).", level="INFO")
 
-    solar_rc = storage_rc = -1
+    solar_rc = storage_rc = units_rc = -1
     try:
         download_mastr_data()
 
         solar_rc = run_subscript("marktstammdatenregister-solar-sync.py")
         storage_rc = run_subscript("marktstammdatenregister-storage-sync.py")
+        units_rc = run_subscript("marktstammdatenregister-units-sync.py", "--carrier", "biomass,hydro")
 
         duration = round(time.time() - start_time)
-        all_ok = solar_rc == 0 and storage_rc == 0
+        all_ok = solar_rc == 0 and storage_rc == 0 and units_rc == 0
 
         if all_ok:
             slack_log(
-                f"MaStR Daily Sync erfolgreich abgeschlossen in {duration}s (Solar + Speicher, Modus: {mode}).",
+                f"MaStR Daily Sync erfolgreich abgeschlossen in {duration}s (Solar + Speicher + Biomasse/Wasser, Modus: {mode}).",
                 level="SUCCESS",
             )
         else:
             slack_log(
                 f"MaStR Daily Sync in {duration}s abgeschlossen (mit Fehlern)\n"
                 f"- Solar:   {'OK' if solar_rc == 0 else f'FEHLER (exit {solar_rc})'}\n"
-                f"- Speicher: {'OK' if storage_rc == 0 else f'FEHLER (exit {storage_rc})'}",
+                f"- Speicher: {'OK' if storage_rc == 0 else f'FEHLER (exit {storage_rc})'}\n"
+                f"- Biomasse/Wasser: {'OK' if units_rc == 0 else f'FEHLER (exit {units_rc})'}",
                 level="ERROR",
             )
 
-        log(f"Done in {duration}s. solar_rc={solar_rc}, storage_rc={storage_rc}")
+        log(f"Done in {duration}s. solar_rc={solar_rc}, storage_rc={storage_rc}, units_rc={units_rc}")
 
     except Exception as e:
         slack_log(f"Fehler beim MaStR Daily Sync: {e}", level="ERROR")
@@ -169,7 +177,7 @@ def main():
     finally:
         cleanup()
 
-    if solar_rc != 0 or storage_rc != 0:
+    if solar_rc != 0 or storage_rc != 0 or units_rc != 0:
         sys.exit(1)
 
 

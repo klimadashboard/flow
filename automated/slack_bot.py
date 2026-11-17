@@ -19,6 +19,7 @@ import json
 import os
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 
 API = "https://slack.com/api/"
@@ -43,13 +44,17 @@ def load_env():
 
 
 def call(method, payload, token):
-    data = json.dumps(payload).encode()
+    # Form-encoded, not JSON: conversations.replies/reactions.add reject a
+    # JSON body with "invalid_arguments: missing required field" even when
+    # the fields are present. chat.postMessage accepts either, so this
+    # covers all four commands uniformly.
+    data = urllib.parse.urlencode(payload).encode()
     req = urllib.request.Request(
         API + method,
         data=data,
         headers={
             "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json; charset=utf-8",
+            "Content-Type": "application/x-www-form-urlencoded",
         },
     )
     try:

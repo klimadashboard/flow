@@ -4,3 +4,4 @@
 git.sh
 /manual/wip/*
 /automated/__pycache__/*
+/automated/.cache/

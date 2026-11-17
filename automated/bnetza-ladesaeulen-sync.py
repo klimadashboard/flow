@@ -4,13 +4,17 @@ Ladesäulenregister Sync (Bundesnetzagentur).
 Syncs the public charging stations list of the Bundesnetzagentur into the
 Directus table mobility_charging_stations (one row per Ladeeinrichtung).
 
-Source: "Liste der Ladesäulen" (CSV and XLSX), linked from
+Source: "Liste der Ladesäulen" via the public BNetzA API (OpenAPI spec v1.0.2,
+sent by the LSV-Team on request; no auth), updated about daily:
+  GET https://ladesaeulenregister.bnetza.de/els/service/public/v1/chargepoints
+If the API fails, the script falls back to the CSV/XLSX download linked from
 https://www.bundesnetzagentur.de/DE/Fachthemen/ElektrizitaetundGas/E-Mobilitaet/start.html
-Licence CC BY 4.0, attribution "Bundesnetzagentur.de". Updated about monthly;
-the CSV and XLSX are not always published on the same day, so the newer of
-the two is used. The list only contains stations currently in operation, so a
-station that disappears gets shutdown_date = date of the first list it is
-missing from (rows are never deleted).
+(updated about monthly; the newer of CSV and XLSX is used). The API JSON is
+converted to the CSV's columns, so both sources go through the same mapping.
+Licence CC BY 4.0, attribution "Bundesnetzagentur.de"; the API comes without
+any availability guarantee. The list only contains stations currently in
+operation, so a station that disappears gets shutdown_date = date of the first
+list it is missing from (rows are never deleted).
 
 The list has no municipality key. Each station is assigned to a municipality
 in our regions table (region = regions.id, region_code = 8-digit AGS):
@@ -26,13 +30,15 @@ in our regions table (region = regions.id, region_code = 8-digit AGS):
 Usage:
     python bnetza-ladesaeulen-sync.py            # import if BNetzA published a newer list
     python bnetza-ladesaeulen-sync.py --force    # import the current list even if already imported
-    python bnetza-ladesaeulen-sync.py --file X   # import a local CSV/XLSX (implies --force)
+    python bnetza-ladesaeulen-sync.py --file X   # import a local JSON/CSV/XLSX (implies --force)
+    python bnetza-ladesaeulen-sync.py --csv      # skip the API, use the CSV/XLSX download
 
 Requires: pandas, openpyxl, shapely, requests, python-dotenv
 Cron (daily, skips quietly when nothing new): 30 6 * * * python3 /home/automated/bnetza-ladesaeulen-sync.py
 """
 
 import io
+import json
 import os
 import re
 import sys
@@ -60,7 +66,9 @@ TABLE_NAME = "mobility_charging_stations"
 BATCH_SIZE = int(os.getenv("DIRECTUS_BATCH_SIZE", 1000))
 FORCE = "--force" in sys.argv or "--file" in sys.argv
 LOCAL_FILE = sys.argv[sys.argv.index("--file") + 1] if "--file" in sys.argv else None
+CSV_ONLY = "--csv" in sys.argv
 
+API_URL = "https://ladesaeulenregister.bnetza.de/els/service/public/v1/chargepoints"
 SOURCE_PAGE = "https://www.bundesnetzagentur.de/DE/Fachthemen/ElektrizitaetundGas/E-Mobilitaet/start.html"
 LIST_LINK_RE = re.compile(
     r"https://data\.bundesnetzagentur\.de/[^\"']*Ladesaeulenregister_BNetzA_(\d{4}-\d{2}-\d{2})\.(csv|xlsx)"
@@ -68,6 +76,7 @@ LIST_LINK_RE = re.compile(
 USER_AGENT = "Mozilla/5.0 (compatible; klimadashboard-flow; +https://klimadashboard.org)"
 HEADER_ROWS = 10  # disclaimer lines + "1. Ladepunkt" group row above the column header
 NEAREST_MAX_DEG = 0.03
+MAX_VANISHED_SHARE = 0.10  # refuse to mark more than this share of active stations as shut down
 
 HEADERS = {
     "Authorization": f"Bearer {DIRECTUS_TOKEN}",
@@ -127,6 +136,60 @@ def read_list(content, is_xlsx):
     return df, list_date
 
 
+def fmt_num(v):
+    """Number -> CSV-style text (22.0 -> "22")."""
+    if v is None:
+        return None
+    return str(int(v)) if float(v).is_integer() else str(v)
+
+
+def read_api(content):
+    """Convert the API JSON into the same DataFrame (CSV column names, text values) as read_list."""
+    data = json.loads(content)
+    d, mth, y = data["documentDate"].split(".")
+    rows = []
+    for s in data.get("chargingStations") or []:
+        coords = s.get("coordinates") or {}
+        days = s.get("opening_days") or []
+        evses = s.get("evses") or []
+        row = {
+            "Ladeeinrichtungs-ID": str(s["id"]),
+            "Betreiber": (s.get("operator") or {}).get("companyName"),
+            "Anzeigename (Karte)": (s.get("operator") or {}).get("displayName"),
+            "Status": (s.get("status") or {}).get("operational"),
+            "Art der Ladeeinrichtung": s.get("type"),
+            "Anzahl Ladepunkte": str(len(evses)) if evses else None,
+            "Nennleistung Ladeeinrichtung [kW]": fmt_num(s.get("max_electric_power_station")),
+            "Inbetriebnahmedatum": s.get("go_live_date"),
+            "Straße": s.get("street"),
+            "Hausnummer": s.get("house_no"),
+            "Adresszusatz": s.get("address_addition"),
+            "Postleitzahl": s.get("postal_code"),
+            "Ort": s.get("city"),
+            "Kreis/kreisfreie Stadt": s.get("district_independent_city"),
+            "Bundesland": s.get("state"),
+            "Breitengrad": fmt_num(coords.get("latitude")),
+            "Längengrad": fmt_num(coords.get("longitude")),
+            "Standortbezeichnung": s.get("location_description"),
+            "Informationen zum Parkraum": s.get("access_restriction"),
+            "Bezahlsysteme": ";".join(s.get("payment_systems") or []) or None,
+            "Öffnungszeiten": s.get("opening_hours_specification"),
+            "Öffnungszeiten: Wochentage": "; ".join(o["weekday"] for o in days) or None,
+            "Öffnungszeiten: Tageszeiten": "; ".join(f"{o['open_from']}-{o['open_to']}" for o in days) or None,
+        }
+        for n, e in enumerate(evses, start=1):
+            conns = e.get("connectors") or []
+            row[f"Steckertypen{n}"] = "; ".join(c["connector_type"] for c in conns if c.get("connector_type")) or None
+            row[f"Nennleistung Stecker{n}"] = "; ".join(
+                fmt_num(c["max_electric_power_connector"]) for c in conns
+                if c.get("max_electric_power_connector") is not None) or None
+            row[f"EVSE-ID{n}"] = e.get("evse_id")
+        rows.append(row)
+    df = pd.DataFrame(rows)
+    df = df.astype(object).where(df.notna(), None)
+    return df, f"{y}-{mth}-{d}"
+
+
 def to_float(v):
     if v is None:
         return None
@@ -134,6 +197,15 @@ def to_float(v):
         return float(str(v).replace(",", "."))
     except ValueError:
         return None
+
+
+def max_power(v):
+    """Connector power per Ladepunkt; several connectors arrive as "22; 22" -> highest value."""
+    if v is None:
+        return None
+    values = [to_float(p) for p in str(v).split(";")]
+    values = [p for p in values if p is not None]
+    return max(values) if values else None
 
 
 # ---------------------------------------------------------------------------
@@ -279,11 +351,13 @@ def build_records(df, matcher):
     records = []
     for i, row in enumerate(df.to_dict("records")):
         connectors = []
-        for n in range(1, 7):
+        n = 0
+        while f"Steckertypen{n + 1}" in row:
+            n += 1
             if row.get(f"Steckertypen{n}"):
                 connectors.append({
                     "type": row[f"Steckertypen{n}"],
-                    "power_kw": to_float(row.get(f"Nennleistung Stecker{n}")),
+                    "power_kw": max_power(row.get(f"Nennleistung Stecker{n}")),
                     "evse_id": row.get(f"EVSE-ID{n}"),
                 })
         opening = row.get("Öffnungszeiten")
@@ -397,6 +471,13 @@ def sync_to_directus(records, list_date):
     listed = {r["id"] for r in records}
     vanished = [i for i, m in existing.items() if i not in listed and not m.get("shutdown_date")]
     log(f"{len(to_insert):,} new, {len(to_update):,} still listed, {len(vanished):,} no longer listed.")
+    # Guard against a truncated or half-empty export marking most stations as shut down
+    active = sum(1 for m in existing.values() if not m.get("shutdown_date"))
+    if active and len(vanished) > MAX_VANISHED_SHARE * active and not FORCE:
+        raise RuntimeError(
+            f"{len(vanished):,} of {active:,} active stations missing from the list "
+            f"(> {MAX_VANISHED_SHARE:.0%}); not importing. Check the source, then rerun with --force."
+        )
 
     inserted = updated = shut_down = 0
     for i in range(0, len(to_insert), BATCH_SIZE):
@@ -416,34 +497,60 @@ def sync_to_directus(records, list_date):
 # Main
 # ---------------------------------------------------------------------------
 
+def already_imported(list_date, last_imported):
+    if not FORCE and last_imported and list_date and list_date <= last_imported:
+        log(f"Latest list ({list_date}) already imported (last_seen {last_imported}). Nothing to do.")
+        return True
+    return False
+
+
+def load_source():
+    """Return (df, list_date, source name), or (None, None, None) when there is nothing new."""
+    if LOCAL_FILE:
+        with open(LOCAL_FILE, "rb") as fh:
+            content = fh.read()
+        name = LOCAL_FILE.lower()
+        df, list_date = read_api(content) if name.endswith(".json") else read_list(content, name.endswith(".xlsx"))
+        return df, list_date, os.path.basename(LOCAL_FILE)
+
+    last_imported = get_last_imported_date()
+
+    if not CSV_ONLY:
+        try:
+            log(f"Downloading {API_URL} ...")
+            r = requests.get(API_URL, headers={"User-Agent": USER_AGENT, "Accept": "application/json"}, timeout=600)
+            r.raise_for_status()
+            df, list_date = read_api(r.content)
+            if df.empty:
+                raise RuntimeError("API returned no stations")
+            if already_imported(list_date, last_imported):
+                return None, None, None
+            return df, list_date, "API"
+        except Exception as e:
+            log(f"API failed ({e}); falling back to the CSV/XLSX download.", level="WARNING")
+            slack_log(f"Ladesäulen-API nicht verfügbar ({e}), nutze CSV/XLSX-Download.", level="WARNING")
+
+    url, file_date = find_latest_list()
+    if already_imported(file_date, last_imported):
+        return None, None, None
+    log(f"Downloading {url} ...")
+    r = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=600)
+    r.raise_for_status()
+    df, list_date = read_list(r.content, url.lower().endswith(".xlsx"))
+    return df, list_date or file_date, os.path.basename(url)
+
+
 def main():
     start_time = time.time()
 
-    if LOCAL_FILE:
-        url, file_date = LOCAL_FILE, None
-        with open(LOCAL_FILE, "rb") as fh:
-            content = fh.read()
-    else:
-        url, file_date = find_latest_list()
-        last_imported = get_last_imported_date()
-        if not FORCE and last_imported and file_date <= last_imported:
-            log(f"Latest list ({file_date}) already imported (last_seen {last_imported}). Nothing to do.")
-            return
-        content = None
-
-    slack_log(f"Ladesäulen-Sync gestartet ({os.path.basename(url)}).", level="INFO")
     try:
-        if content is None:
-            log(f"Downloading {url} ...")
-            r = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=600)
-            r.raise_for_status()
-            content = r.content
-
-        df, list_date = read_list(content, url.lower().endswith(".xlsx"))
-        list_date = list_date or file_date
+        df, list_date, source = load_source()
+        if df is None:
+            return
         if not list_date:
-            raise RuntimeError("Could not determine the list date ('Letzte Aktualisierung vom').")
-        log(f"Read {len(df):,} stations, list date {list_date}.")
+            raise RuntimeError("Could not determine the list date.")
+        log(f"Read {len(df):,} stations from {source}, list date {list_date}.")
+        slack_log(f"Ladesäulen-Sync gestartet ({source}, Stand {list_date}).", level="INFO")
 
         records = build_records(df, RegionMatcher())
         sources = pd.Series([r["region_source"] for r in records]).value_counts(dropna=False).to_dict()

@@ -109,7 +109,11 @@ def read_list(content, is_xlsx):
         df = df.astype(object).where(df.notna(), None)
         df = df.map(lambda v: None if v is None else (str(int(v)) if isinstance(v, float) and v.is_integer() else str(v)))
     else:
-        text = content.decode("utf-8-sig")
+        # BNetzA switched the CSV from UTF-8 to cp1252 with the 2026-11-12 list
+        try:
+            text = content.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            text = content.decode("cp1252")
         raw = pd.read_csv(io.StringIO(text), sep=";", header=None, dtype=str, nrows=HEADER_ROWS, on_bad_lines="skip")
         df = pd.read_csv(io.StringIO(text), sep=";", skiprows=HEADER_ROWS, dtype=str, low_memory=False)
         df = df.astype(object).where(df.notna(), None)
